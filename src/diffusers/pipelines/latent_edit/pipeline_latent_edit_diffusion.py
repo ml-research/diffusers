@@ -1,5 +1,8 @@
 import inspect
-from typing import Callable, List, Optional, Union, Dict
+import warnings
+from itertools import repeat
+from math import sqrt
+from typing import Callable, Dict, List, Optional, Union
 
 import torch
 
@@ -8,13 +11,11 @@ from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...pipeline_utils import DiffusionPipeline
+from ...pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from ...utils import deprecate, logging
 from . import LatentEditDiffusionPipelineOutput
-import warnings
-from itertools import repeat
-from math import sqrt
-from ...pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -50,14 +51,14 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
     """
 
     def __init__(
-            self,
-            vae: AutoencoderKL,
-            text_encoder: CLIPTextModel,
-            tokenizer: CLIPTokenizer,
-            unet: UNet2DConditionModel,
-            scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
-            safety_checker: StableDiffusionSafetyChecker,
-            feature_extractor: CLIPFeatureExtractor,
+        self,
+        vae: AutoencoderKL,
+        text_encoder: CLIPTextModel,
+        tokenizer: CLIPTokenizer,
+        unet: UNet2DConditionModel,
+        scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
+        safety_checker: StableDiffusionSafetyChecker,
+        feature_extractor: CLIPFeatureExtractor,
     ):
         super().__init__()
 
@@ -124,30 +125,30 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
 
     @torch.no_grad()
     def __call__(
-            self,
-            prompt: Union[str, List[str]],
-            height: int = 512,
-            width: int = 512,
-            num_inference_steps: int = 50,
-            guidance_scale: float = 7.5,
-            negative_prompt: Optional[Union[str, List[str]]] = None,
-            num_images_per_prompt: Optional[int] = 1,
-            eta: float = 0.0,
-            generator: Optional[torch.Generator] = None,
-            latents: Optional[torch.FloatTensor] = None,
-            output_type: Optional[str] = "pil",
-            return_dict: bool = True,
-            callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-            callback_steps: Optional[int] = 1,
-            editing_prompt: Optional[Union[str, List[str]]] = None,
-            reverse_editing_direction: Optional[Union[bool, List[bool]]] = False,
-            edit_guidance_scale: Optional[Union[float, List[float]]] = 500,
-            edit_warmup_steps: Optional[Union[int, List[int]]] = 10,
-            edit_threshold: Optional[Union[float, List[float]]] = None,
-            edit_momentum_scale: Optional[float] = 0.1,
-            edit_mom_beta: Optional[float] = 0.4,
-            edit_weights: Optional[List[float]] = None,
-            **kwargs,
+        self,
+        prompt: Union[str, List[str]],
+        height: int = 512,
+        width: int = 512,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        num_images_per_prompt: Optional[int] = 1,
+        eta: float = 0.0,
+        generator: Optional[torch.Generator] = None,
+        latents: Optional[torch.FloatTensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: Optional[int] = 1,
+        editing_prompt: Optional[Union[str, List[str]]] = None,
+        reverse_editing_direction: Optional[Union[bool, List[bool]]] = False,
+        edit_guidance_scale: Optional[Union[float, List[float]]] = 500,
+        edit_warmup_steps: Optional[Union[int, List[int]]] = 10,
+        edit_threshold: Optional[Union[float, List[float]]] = None,
+        edit_momentum_scale: Optional[float] = 0.1,
+        edit_mom_beta: Optional[float] = 0.4,
+        edit_weights: Optional[List[float]] = None,
+        **kwargs,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -204,18 +205,18 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
             edit_guidance_scale (`float` or `List[float]`, *optional*, defaults to 500):
                 Guidance scale for latent guidance. If provided as list values should correspond to `editing_prompt`.
             edit_warmup_steps (`float` or `List[float]`, *optional*, defaults to 10):
-                Number of diffusion steps (for each prompt) for which latent guidance will not be applied. Momentum will
-                still be calculated for those steps and applied once all warmup periods are over.
+                Number of diffusion steps (for each prompt) for which latent guidance will not be applied. Momentum
+                will still be calculated for those steps and applied once all warmup periods are over.
             edit_threshold (`float` or `List[float]`, *optional*, defaults to `None`):
                 Threshold that separates the hyperplane between image content that should be changed or not.
                  Parameter is only optional if latent guidance is disabled, i.e.
-                `editing_prompt = None`. Guidance moving towards the specified `editing_prompt` should use a
-                negative `edit_threshold`, whereas negative guided prompts (i.e. `reverse_editing_direction = True `)
-                should use positive thresholds.
+                `editing_prompt = None`. Guidance moving towards the specified `editing_prompt` should use a negative
+                `edit_threshold`, whereas negative guided prompts (i.e. `reverse_editing_direction = True `) should use
+                positive thresholds.
             edit_momentum_scale (`float`, *optional*, defaults to 0.1):
-                Scale of the momentum to be added to the latent guidance at each diffusion step. If set to 0.0
-                momentum will be disabled. Momentum is already built up during warmup, i.e. for diffusion steps smaller
-                than `sld_warmup_steps`. Momentum will only be added to latent guidance once all warmup periods are
+                Scale of the momentum to be added to the latent guidance at each diffusion step. If set to 0.0 momentum
+                will be disabled. Momentum is already built up during warmup, i.e. for diffusion steps smaller than
+                `sld_warmup_steps`. Momentum will only be added to latent guidance once all warmup periods are
                 finished.
             edit_mom_beta (`float`, *optional*, defaults to 0.4):
                 Defines how latent guidance momentum builds up. `edit_mom_beta` indicates how much of the previous
@@ -244,7 +245,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
         if (callback_steps is None) or (
-                callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
         ):
             raise ValueError(
                 f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
@@ -253,14 +254,13 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
 
         if editing_prompt:
             enable_edit_guidance = True
-            if isinstance(editing_prompt,str):
+            if isinstance(editing_prompt, str):
                 editing_prompt = [editing_prompt]
             enabled_editing_prompts = len(editing_prompt)
 
         else:
             enabled_editing_prompts = 0
             enable_edit_guidance = False
-
 
         # get prompt text embeddings
         text_inputs = self.tokenizer(
@@ -272,7 +272,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
         text_input_ids = text_inputs.input_ids
 
         if text_input_ids.shape[-1] > self.tokenizer.model_max_length:
-            removed_text = self.tokenizer.batch_decode(text_input_ids[:, self.tokenizer.model_max_length:])
+            removed_text = self.tokenizer.batch_decode(text_input_ids[:, self.tokenizer.model_max_length :])
             logger.warning(
                 "The following part of your input was truncated because CLIP can only handle sequences up to"
                 f" {self.tokenizer.model_max_length} tokens: {removed_text}"
@@ -297,7 +297,9 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
             edit_concepts_input_ids = edit_concepts_input.input_ids
 
             if edit_concepts_input_ids.shape[-1] > self.tokenizer.model_max_length:
-                removed_text = self.tokenizer.batch_decode(edit_concepts_input_ids[:, self.tokenizer.model_max_length:])
+                removed_text = self.tokenizer.batch_decode(
+                    edit_concepts_input_ids[:, self.tokenizer.model_max_length :]
+                )
                 logger.warning(
                     "The following part of your input was truncated because CLIP can only handle sequences up to"
                     f" {self.tokenizer.model_max_length} tokens: {removed_text}"
@@ -401,8 +403,9 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
 
         for i, t in enumerate(self.progress_bar(timesteps_tensor)):
             # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat(
-                [latents] * (2 + enabled_editing_prompts)) if do_classifier_free_guidance else latents
+            latent_model_input = (
+                torch.cat([latents] * (2 + enabled_editing_prompts)) if do_classifier_free_guidance else latents
+            )
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
             # predict the noise residual
@@ -415,22 +418,22 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                 noise_pred_edit_concepts = noise_pred_out[2:]
 
                 # default text guidance
-                noise_guidance = (noise_pred_text - noise_pred_uncond)
-                #noise_guidance = (noise_pred_text - noise_pred_edit_concepts[0])
+                noise_guidance = noise_pred_text - noise_pred_uncond
+                # noise_guidance = (noise_pred_text - noise_pred_edit_concepts[0])
 
                 if edit_momentum is None:
                     edit_momentum = torch.zeros_like(noise_guidance)
 
                 if enable_edit_guidance:
-
-                    concept_weights = torch.zeros((len(noise_pred_edit_concepts), noise_guidance.shape[0])
-                                                  , device=self.device)
-                    noise_guidance_edit = torch.zeros((len(noise_pred_edit_concepts), *noise_guidance.shape)
-                                                        , device=self.device)
-                    #noise_guidance_edit = torch.zeros_like(noise_guidance)
+                    concept_weights = torch.zeros(
+                        (len(noise_pred_edit_concepts), noise_guidance.shape[0]), device=self.device
+                    )
+                    noise_guidance_edit = torch.zeros(
+                        (len(noise_pred_edit_concepts), *noise_guidance.shape), device=self.device
+                    )
+                    # noise_guidance_edit = torch.zeros_like(noise_guidance)
                     warmup_inds = []
                     for c, noise_pred_edit_concept in enumerate(noise_pred_edit_concepts):
-
                         if isinstance(edit_guidance_scale, list):
                             edit_guidance_scale_c = edit_guidance_scale[c]
                         else:
@@ -457,21 +460,27 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
 
                         # check sign and scale.
                         scale = torch.clamp(
-                            torch.abs((noise_pred_text - noise_pred_edit_concept)) * edit_guidance_scale_c, max=1.)
+                            torch.abs((noise_pred_text - noise_pred_edit_concept)) * edit_guidance_scale_c, max=1.0
+                        )
 
                         if reverse_editing_direction_c:
                             edit_concept_scale = torch.where(
                                 (noise_pred_text - noise_pred_edit_concept) >= edit_threshold_c,
-                                torch.zeros_like(scale), scale)
+                                torch.zeros_like(scale),
+                                scale,
+                            )
                         else:
                             edit_concept_scale = torch.where(
                                 (noise_pred_text - noise_pred_edit_concept) <= edit_threshold_c,
-                                torch.zeros_like(scale), scale)
+                                torch.zeros_like(scale),
+                                scale,
+                            )
 
                         noise_guidance_edit_tmp = torch.mul(
-                            (noise_pred_edit_concept - noise_pred_uncond), edit_concept_scale)
+                            (noise_pred_edit_concept - noise_pred_uncond), edit_concept_scale
+                        )
 
-                        #tmp_weights = (noise_pred_text - noise_pred_edit_concept).sum(dim=(1, 2, 3))
+                        # tmp_weights = (noise_pred_text - noise_pred_edit_concept).sum(dim=(1, 2, 3))
                         tmp_weights = (noise_guidance - noise_pred_edit_concept).sum(dim=(1, 2, 3))
 
                         tmp_weights = torch.full_like(tmp_weights, edit_weight_c) * (1 / enabled_editing_prompts)
@@ -480,22 +489,26 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                         concept_weights[c, :] = tmp_weights
                         noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
 
-                        #noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
+                        # noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
 
                     warmup_inds = torch.tensor(warmup_inds).to(self.device)
                     if len(noise_pred_edit_concepts) > warmup_inds.shape[0] > 0:
-                        concept_weights = concept_weights.to('cpu') # Offload to cpu
-                        noise_guidance_edit = noise_guidance_edit.to('cpu')
+                        concept_weights = concept_weights.to("cpu")  # Offload to cpu
+                        noise_guidance_edit = noise_guidance_edit.to("cpu")
 
                         concept_weights_tmp = torch.index_select(concept_weights.to(self.device), 0, warmup_inds)
-                        concept_weights_tmp = torch.where(concept_weights_tmp < 0,
-                                                          torch.zeros_like(concept_weights_tmp), concept_weights_tmp)
+                        concept_weights_tmp = torch.where(
+                            concept_weights_tmp < 0, torch.zeros_like(concept_weights_tmp), concept_weights_tmp
+                        )
                         concept_weights_tmp = concept_weights_tmp / concept_weights_tmp.sum(dim=0)
                         concept_weights_tmp = torch.nan_to_num(concept_weights_tmp)
 
-                        noise_guidance_edit_tmp = torch.index_select(noise_guidance_edit.to(self.device), 0, warmup_inds)
-                        noise_guidance_edit_tmp = torch.einsum("cb,cbijk->bijk", concept_weights_tmp,
-                                                               noise_guidance_edit_tmp)
+                        noise_guidance_edit_tmp = torch.index_select(
+                            noise_guidance_edit.to(self.device), 0, warmup_inds
+                        )
+                        noise_guidance_edit_tmp = torch.einsum(
+                            "cb,cbijk->bijk", concept_weights_tmp, noise_guidance_edit_tmp
+                        )
 
                         noise_guidance = noise_guidance + noise_guidance_edit_tmp
                         del noise_guidance_edit_tmp
@@ -503,8 +516,9 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                         concept_weights = concept_weights.to(self.device)
                         noise_guidance_edit = noise_guidance_edit.to(self.device)
 
-                    concept_weights = torch.where(concept_weights < 0, torch.zeros_like(concept_weights),
-                                                  concept_weights)
+                    concept_weights = torch.where(
+                        concept_weights < 0, torch.zeros_like(concept_weights), concept_weights
+                    )
                     concept_weights = concept_weights / concept_weights.sum(dim=0)
                     concept_weights = torch.nan_to_num(concept_weights)
                     noise_guidance_edit = torch.einsum("cb,cbijk->bijk", concept_weights, noise_guidance_edit)

@@ -19,8 +19,8 @@ class LatentEditDiffusionPipelineOutput(BaseOutput):
             List of denoised PIL images of length `batch_size` or numpy array of shape `(batch_size, height, width,
             num_channels)`. PIL images or numpy array present the denoised images of the diffusion pipeline.
         inappropriate_content_detected (`List[bool]`)
-            List of flags denoting whether the corresponding generated image likely represents inappropriate
-            content, or `None` if safety checking could not be performed.
+            List of flags denoting whether the corresponding generated image likely represents inappropriate content,
+            or `None` if safety checking could not be performed.
     """
 
     images: Union[List[PIL.Image.Image], np.ndarray]
@@ -29,5 +29,3 @@ class LatentEditDiffusionPipelineOutput(BaseOutput):
 
 if is_transformers_available() and is_torch_available():
     from .pipeline_latent_edit_diffusion import LatentEditDiffusionPipeline
-
-

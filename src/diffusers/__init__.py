@@ -39,6 +39,7 @@ if is_torch_available():
         PNDMPipeline,
         RePaintPipeline,
         ScoreSdeVePipeline,
+        LatentEditDiffusionPipeline
     )
     from .schedulers import (
         DDIMScheduler,
