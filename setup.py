@@ -205,8 +205,9 @@ install_requires = [
     deps["numpy"],
     deps["regex"],
     deps["requests"],
-    deps["Pillow"],
     deps["transformers"],
+    deps["Pillow"],
+
 ]
 
 setup(
