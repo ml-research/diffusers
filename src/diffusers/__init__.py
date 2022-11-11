@@ -34,12 +34,12 @@ if is_torch_available():
         DDIMPipeline,
         DDPMPipeline,
         KarrasVePipeline,
+        LatentEditDiffusionPipeline,
         LDMPipeline,
         LDMSuperResolutionPipeline,
         PNDMPipeline,
         RePaintPipeline,
         ScoreSdeVePipeline,
-        LatentEditDiffusionPipeline
     )
     from .schedulers import (
         DDIMScheduler,

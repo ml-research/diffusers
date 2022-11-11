@@ -1,8 +1,7 @@
 import inspect
 import warnings
 from itertools import repeat
-from math import sqrt
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import torch
 

@@ -16,6 +16,7 @@ else:
 
 if is_torch_available() and is_transformers_available():
     from .latent_diffusion import LDMTextToImagePipeline
+    from .latent_edit import LatentEditDiffusionPipeline
     from .stable_diffusion import (
         CycleDiffusionPipeline,
         StableDiffusionImg2ImgPipeline,
@@ -24,7 +25,6 @@ if is_torch_available() and is_transformers_available():
         StableDiffusionPipeline,
     )
     from .stable_diffusion_safe import StableDiffusionPipelineSafe
-    from .latent_edit import LatentEditDiffusionPipeline
     from .vq_diffusion import VQDiffusionPipeline
 
 if is_transformers_available() and is_onnx_available():
