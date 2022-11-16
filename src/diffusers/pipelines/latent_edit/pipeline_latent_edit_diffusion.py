@@ -140,6 +140,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         editing_prompt: Optional[Union[str, List[str]]] = None,
+        editing_prompt_prompt_embeddings=None,
         reverse_editing_direction: Optional[Union[bool, List[bool]]] = False,
         edit_guidance_scale: Optional[Union[float, List[float]]] = 500,
         edit_warmup_steps: Optional[Union[int, List[int]]] = 10,
@@ -147,6 +148,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
         edit_momentum_scale: Optional[float] = 0.1,
         edit_mom_beta: Optional[float] = 0.4,
         edit_weights: Optional[List[float]] = None,
+
         **kwargs,
     ):
         r"""
@@ -256,10 +258,13 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
             if isinstance(editing_prompt, str):
                 editing_prompt = [editing_prompt]
             enabled_editing_prompts = len(editing_prompt)
-
+        elif editing_prompt_prompt_embeddings is not None:
+            enable_edit_guidance = True
+            enabled_editing_prompts = editing_prompt_prompt_embeddings.shape[0]
         else:
             enabled_editing_prompts = 0
             enable_edit_guidance = False
+
 
         # get prompt text embeddings
         text_inputs = self.tokenizer(
@@ -279,6 +284,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
             text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
         text_embeddings = self.text_encoder(text_input_ids.to(self.device))[0]
 
+
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         bs_embed, seq_len, _ = text_embeddings.shape
         text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
@@ -286,25 +292,28 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
 
         if enable_edit_guidance:
             # get safety text embeddings
-            edit_concepts_input = self.tokenizer(
-                [x for item in editing_prompt for x in repeat(item, batch_size)],
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                return_tensors="pt",
-            )
-
-            edit_concepts_input_ids = edit_concepts_input.input_ids
-
-            if edit_concepts_input_ids.shape[-1] > self.tokenizer.model_max_length:
-                removed_text = self.tokenizer.batch_decode(
-                    edit_concepts_input_ids[:, self.tokenizer.model_max_length :]
+            if editing_prompt_prompt_embeddings is None:
+                edit_concepts_input = self.tokenizer(
+                    [x for item in editing_prompt for x in repeat(item, batch_size)],
+                    padding="max_length",
+                    max_length=self.tokenizer.model_max_length,
+                    return_tensors="pt",
                 )
-                logger.warning(
-                    "The following part of your input was truncated because CLIP can only handle sequences up to"
-                    f" {self.tokenizer.model_max_length} tokens: {removed_text}"
-                )
-                text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
-            edit_concepts = self.text_encoder(edit_concepts_input_ids.to(self.device))[0]
+
+                edit_concepts_input_ids = edit_concepts_input.input_ids
+
+                if edit_concepts_input_ids.shape[-1] > self.tokenizer.model_max_length:
+                    removed_text = self.tokenizer.batch_decode(
+                        edit_concepts_input_ids[:, self.tokenizer.model_max_length :]
+                    )
+                    logger.warning(
+                        "The following part of your input was truncated because CLIP can only handle sequences up to"
+                        f" {self.tokenizer.model_max_length} tokens: {removed_text}"
+                    )
+                    edit_concepts_input_ids = edit_concepts_input_ids[:, : self.tokenizer.model_max_length]
+                edit_concepts = self.text_encoder(edit_concepts_input_ids.to(self.device))[0]
+            else:
+                edit_concepts = editing_prompt_prompt_embeddings.to(self.device)
 
             # duplicate text embeddings for each generation per prompt, using mps friendly method
             bs_embed_edit, seq_len_edit, _ = edit_concepts.shape
