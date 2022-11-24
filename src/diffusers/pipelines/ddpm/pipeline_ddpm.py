@@ -71,7 +71,7 @@ class DDPMPipeline(DiffusionPipeline):
         """
         message = (
             "Please make sure to instantiate your scheduler with `predict_epsilon` instead. E.g. `scheduler ="
-            " DDPMScheduler.from_config(<model_id>, predict_epsilon=True)`."
+            " DDPMScheduler.from_pretrained(<model_id>, predict_epsilon=True)`."
         )
         predict_epsilon = deprecate("predict_epsilon", "0.10.0", message, take_from=kwargs)
 
@@ -94,7 +94,11 @@ class DDPMPipeline(DiffusionPipeline):
             generator = None
 
         # Sample gaussian noise to begin loop
-        image_shape = (batch_size, self.unet.in_channels, self.unet.sample_size, self.unet.sample_size)
+        if isinstance(self.unet.sample_size, int):
+            image_shape = (batch_size, self.unet.in_channels, self.unet.sample_size, self.unet.sample_size)
+        else:
+            image_shape = (batch_size, self.unet.in_channels, *self.unet.sample_size)
+
         if self.device.type == "mps":
             # randn does not work reproducibly on mps
             image = torch.randn(image_shape, generator=generator)
