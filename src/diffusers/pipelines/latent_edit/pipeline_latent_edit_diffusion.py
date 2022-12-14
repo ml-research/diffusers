@@ -325,6 +325,8 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
         # get unconditional embeddings for classifier free guidance
+
+
         if do_classifier_free_guidance:
             uncond_tokens: List[str]
             if negative_prompt is None:
@@ -409,6 +411,10 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
         # Initialize edit_momentum to None
         edit_momentum = None
 
+        self.uncond_estimates = None
+        self.text_estimates = None
+        self.edit_estimates = None
+
         for i, t in enumerate(self.progress_bar(timesteps_tensor)):
             # expand the latents if we are doing classifier free guidance
             latent_model_input = (
@@ -429,10 +435,22 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                 noise_guidance = noise_pred_text - noise_pred_uncond
                 # noise_guidance = (noise_pred_text - noise_pred_edit_concepts[0])
 
+                if self.uncond_estimates is None:
+                    self.uncond_estimates = torch.zeros((num_inference_steps+1, *noise_pred_uncond.shape))
+                self.uncond_estimates[i] = noise_pred_uncond.detach().cpu()
+
+                if self.text_estimates is None:
+                    self.text_estimates = torch.zeros((num_inference_steps+1, *noise_pred_text.shape))
+                self.text_estimates[i] = noise_pred_text.detach().cpu()
+
+                if self.edit_estimates is None and enable_edit_guidance:
+                    self.edit_estimates = torch.zeros((num_inference_steps+1, len(noise_pred_edit_concepts), *noise_pred_edit_concepts[0].shape))
+
                 if edit_momentum is None:
                     edit_momentum = torch.zeros_like(noise_guidance)
 
                 if enable_edit_guidance:
+
                     concept_weights = torch.zeros(
                         (len(noise_pred_edit_concepts), noise_guidance.shape[0]), device=self.device
                     )
@@ -442,6 +460,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                     # noise_guidance_edit = torch.zeros_like(noise_guidance)
                     warmup_inds = []
                     for c, noise_pred_edit_concept in enumerate(noise_pred_edit_concepts):
+                        self.edit_estimates[i, c] = noise_pred_edit_concept
                         if isinstance(edit_guidance_scale, list):
                             edit_guidance_scale_c = edit_guidance_scale[c]
                         else:
