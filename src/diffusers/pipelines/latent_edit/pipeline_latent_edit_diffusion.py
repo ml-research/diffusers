@@ -432,7 +432,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                 noise_pred_edit_concepts = noise_pred_out[2:]
 
                 # default text guidance
-                noise_guidance = noise_pred_text - noise_pred_uncond
+                noise_guidance = guidance_scale * (noise_pred_text - noise_pred_uncond)
                 # noise_guidance = (noise_pred_text - noise_pred_edit_concepts[0])
 
                 if self.uncond_estimates is None:
@@ -486,22 +486,28 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                             warmup_inds.append(c)
 
                         # check sign and scale.
-                        scale = torch.clamp(
-                            torch.abs((noise_pred_text - noise_pred_edit_concept)) * edit_guidance_scale_c, max=1.0
-                        )
+                        #scale = torch.clamp(
+                        #    torch.abs((noise_pred_text - noise_pred_edit_concept)) * edit_guidance_scale_c, 1.0
+                        #)
 
+                        scale = edit_guidance_scale_c
+                        scale = 1
+                        flat = (noise_pred_text - noise_pred_edit_concept).flatten(start_dim=1)
                         if reverse_editing_direction_c:
-                            edit_concept_scale = torch.where(
-                                (noise_pred_text - noise_pred_edit_concept) >= edit_threshold_c,
-                                torch.zeros_like(scale),
-                                scale,
-                            )
+                            pass
                         else:
-                            edit_concept_scale = torch.where(
-                                (noise_pred_text - noise_pred_edit_concept) <= edit_threshold_c,
-                                torch.zeros_like(scale),
-                                scale,
-                            )
+                            flat = flat * -1
+
+                        k = int(flat.shape[-1] * edit_threshold_c)
+                        vals, inds = torch.topk(flat, k, dim=1)
+                        edit_concept_scale = torch.zeros_like(flat)
+                        flat_inds = (
+                        torch.LongTensor([[x] * k for x in range(batch_size * num_images_per_prompt)]).flatten(),
+                        inds.flatten())
+                        edit_concept_scale[flat_inds] = scale#.flatten(start_dim=1)[flat_inds]
+                        edit_concept_scale = edit_concept_scale.reshape(noise_pred_edit_concept.shape)
+
+                        edit_concept_scale = torch.clamp_(edit_concept_scale, torch.min(noise_pred_text), torch.max(noise_pred_text))
 
                         noise_guidance_edit_tmp = torch.mul(
                             (noise_pred_edit_concept - noise_pred_uncond), edit_concept_scale
@@ -514,7 +520,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                         if reverse_editing_direction_c:
                             noise_guidance_edit_tmp = noise_guidance_edit_tmp * -1
                         concept_weights[c, :] = tmp_weights
-                        noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
+                        noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp * edit_guidance_scale_c
 
                         # noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
 
@@ -561,7 +567,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
 
                 # apply guidance
 
-                noise_pred = noise_pred_uncond + guidance_scale * noise_guidance
+                noise_pred = noise_pred_uncond + noise_guidance
 
                 # compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
