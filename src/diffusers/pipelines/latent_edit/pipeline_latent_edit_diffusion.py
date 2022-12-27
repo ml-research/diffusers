@@ -144,11 +144,13 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
         reverse_editing_direction: Optional[Union[bool, List[bool]]] = False,
         edit_guidance_scale: Optional[Union[float, List[float]]] = 500,
         edit_warmup_steps: Optional[Union[int, List[int]]] = 10,
+        edit_cooldown_steps: Optional[Union[int, List[int]]] = None,
         edit_threshold: Optional[Union[float, List[float]]] = None,
         edit_momentum_scale: Optional[float] = 0.1,
         edit_mom_beta: Optional[float] = 0.4,
         edit_weights: Optional[List[float]] = None,
-
+        enable_dynamic_thresholding = False,
+        dynamic_percentile = 0.9,
         **kwargs,
     ):
         r"""
@@ -482,45 +484,37 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                             edit_warmup_steps_c = edit_warmup_steps[c]
                         else:
                             edit_warmup_steps_c = edit_warmup_steps
+
+                        if isinstance(edit_cooldown_steps, list):
+                            edit_cooldown_steps_c = edit_cooldown_steps[c]
+                        elif edit_cooldown_steps is None:
+                            edit_cooldown_steps_c = i + 1
+                        else:
+                            edit_cooldown_steps_c = edit_cooldown_steps
                         if i >= edit_warmup_steps_c:
                             warmup_inds.append(c)
+                        if i >= edit_cooldown_steps_c:
+                            noise_guidance_edit[c, :, :, :, :] = torch.zeros_like(noise_pred_edit_concept)
+                            continue
 
-                        # check sign and scale.
-                        #scale = torch.clamp(
-                        #    torch.abs((noise_pred_text - noise_pred_edit_concept)) * edit_guidance_scale_c, 1.0
-                        #)
-
-                        scale = edit_guidance_scale_c
-                        scale = 1
-                        flat = (noise_pred_text - noise_pred_edit_concept).flatten(start_dim=1)
-                        if reverse_editing_direction_c:
-                            pass
-                        else:
-                            flat = flat * -1
-
-                        k = int(flat.shape[-1] * edit_threshold_c)
-                        vals, inds = torch.topk(flat, k, dim=1)
-                        edit_concept_scale = torch.zeros_like(flat)
-                        flat_inds = (
-                        torch.LongTensor([[x] * k for x in range(batch_size * num_images_per_prompt)]).flatten(),
-                        inds.flatten())
-                        edit_concept_scale[flat_inds] = scale#.flatten(start_dim=1)[flat_inds]
-                        edit_concept_scale = edit_concept_scale.reshape(noise_pred_edit_concept.shape)
-
-                        edit_concept_scale = torch.clamp_(edit_concept_scale, torch.min(noise_pred_text), torch.max(noise_pred_text))
-
-                        noise_guidance_edit_tmp = torch.mul(
-                            (noise_pred_edit_concept - noise_pred_uncond), edit_concept_scale
-                        )
-
+                        noise_guidance_edit_tmp = noise_pred_edit_concept - noise_pred_uncond
                         # tmp_weights = (noise_pred_text - noise_pred_edit_concept).sum(dim=(1, 2, 3))
                         tmp_weights = (noise_guidance - noise_pred_edit_concept).sum(dim=(1, 2, 3))
 
-                        tmp_weights = torch.full_like(tmp_weights, edit_weight_c) * (1 / enabled_editing_prompts)
+                        tmp_weights = torch.full_like(tmp_weights, edit_weight_c) #* (1 / enabled_editing_prompts)
                         if reverse_editing_direction_c:
                             noise_guidance_edit_tmp = noise_guidance_edit_tmp * -1
                         concept_weights[c, :] = tmp_weights
-                        noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp * edit_guidance_scale_c
+
+                        noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
+                        tmp = torch.quantile(torch.abs(noise_guidance_edit_tmp).flatten(start_dim=2), edit_threshold_c, dim=2, keepdim=False)
+                        noise_guidance_edit_tmp = torch.where(
+                            torch.abs(noise_guidance_edit_tmp) >= tmp[:, :, None, None]
+                            , noise_guidance_edit_tmp
+                            , torch.zeros_like(noise_guidance_edit_tmp)
+                        )
+                        noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
+
 
                         # noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
 
@@ -534,7 +528,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                             concept_weights_tmp < 0, torch.zeros_like(concept_weights_tmp), concept_weights_tmp
                         )
                         concept_weights_tmp = concept_weights_tmp / concept_weights_tmp.sum(dim=0)
-                        concept_weights_tmp = torch.nan_to_num(concept_weights_tmp)
+                       # concept_weights_tmp = torch.nan_to_num(concept_weights_tmp)
 
                         noise_guidance_edit_tmp = torch.index_select(
                             noise_guidance_edit.to(self.device), 0, warmup_inds
@@ -542,7 +536,7 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                         noise_guidance_edit_tmp = torch.einsum(
                             "cb,cbijk->bijk", concept_weights_tmp, noise_guidance_edit_tmp
                         )
-
+                        noise_guidance_edit_tmp = noise_guidance_edit_tmp
                         noise_guidance = noise_guidance + noise_guidance_edit_tmp
                         del noise_guidance_edit_tmp
                         del concept_weights_tmp
@@ -552,20 +546,18 @@ class LatentEditDiffusionPipeline(DiffusionPipeline):
                     concept_weights = torch.where(
                         concept_weights < 0, torch.zeros_like(concept_weights), concept_weights
                     )
-                    concept_weights = concept_weights / concept_weights.sum(dim=0)
+
                     concept_weights = torch.nan_to_num(concept_weights)
                     noise_guidance_edit = torch.einsum("cb,cbijk->bijk", concept_weights, noise_guidance_edit)
-                    # Increase safety guidance by scaled momentum
-                    # noise_guidance_edit = noise_guidance_edit.mean(dim=0)
 
                     noise_guidance_edit = noise_guidance_edit + edit_momentum_scale * edit_momentum
-                    # Calculate next momentum
+
                     edit_momentum = edit_mom_beta * edit_momentum + (1 - edit_mom_beta) * noise_guidance_edit
 
                     if warmup_inds.shape[0] == len(noise_pred_edit_concepts):
+
                         noise_guidance = noise_guidance + noise_guidance_edit
 
-                # apply guidance
 
                 noise_pred = noise_pred_uncond + noise_guidance
 
