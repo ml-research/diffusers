@@ -30,3 +30,4 @@ class SemanticStableDiffusionPipelineOutput(BaseOutput):
 
 if is_transformers_available() and is_torch_available():
     from .pipeline_semantic_stable_diffusion import SemanticStableDiffusionPipeline
+    from .pipeline_semantic_stable_diffusion_img2img import SemanticStableDiffusionImg2ImgPipeline
