@@ -603,7 +603,7 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
         )
         uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
         text_input = self.tokenizer(
-            [prompt],
+            [""],
             padding="max_length",
             max_length=self.tokenizer.model_max_length,
             truncation=True,
@@ -611,7 +611,7 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
         )
         text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
         self.context = torch.cat([uncond_embeddings, text_embeddings])
-        self.prompt = prompt
+
 
     @torch.no_grad()
     def image2latent(self, image):
@@ -734,15 +734,15 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
         return cond_embeddings_list
 
 
-    def invert(self, image_path: str, prompt: str, guidance_scale:int, offsets=(0, 0, 0, 0), num_inner_steps=10, early_stop_epsilon=1e-5,
+    def invert(self, image_path: str, guidance_scale:int, offsets=(0, 0, 0, 0), num_inner_steps=10, early_stop_epsilon=1e-5,
                verbose=False, num_inverstion_steps: int = 50):
         self.num_inversion_steps = num_inverstion_steps
         self.scheduler.set_timesteps(self.num_inversion_steps)
-        self.prompt = None
+
         self.context = None
         self.guidance_scale = guidance_scale
 
-        self.init_prompt(prompt)
+        self.init_prompt("")
         # ptp_utils.register_attention_control(self.model, None)
         image_gt = load_512(image_path, *offsets)
         if verbose:
