@@ -386,8 +386,10 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
         num_images_per_prompt=1,
         device=None,
         negative_prompt=None,
+        editing_prompt=None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        edit_prompt_embeds: Optional[torch.FloatTensor] = None,
         clean_caption: bool = False,
     ):
         r"""
@@ -406,6 +408,8 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
                 The prompt or prompts not to guide the image generation. If not defined, one has to pass
                 `negative_prompt_embeds`. instead. If not defined, one has to pass `negative_prompt_embeds`. instead.
                 Ignored when not using guidance (i.e., ignored if `guidance_scale` is less than `1`).
+            editing_prompt (`str` or `List[str]`, *optional*):
+                The prompt used for semantic guidance
             prompt_embeds (`torch.FloatTensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
@@ -513,6 +517,33 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
             )
             negative_prompt_embeds = negative_prompt_embeds[0]
 
+            if editing_prompt is not None and edit_prompt_embeds is None:
+                edit_tokens: List[str]
+                if isinstance(editing_prompt, str):
+                    edit_tokens = [editing_prompt]
+                else:
+                    edit_tokens = editing_prompt
+                edit_tokens = [x for item in edit_tokens for x in repeat(item, batch_size)]
+                edit_tokens = self._text_preprocessing(edit_tokens, clean_caption=clean_caption)
+
+                max_length = prompt_embeds.shape[1]
+                edit_input = self.tokenizer(
+                    edit_tokens,
+                    padding="max_length",
+                    max_length=max_length,
+                    truncation=True,
+                    return_attention_mask=True,
+                    add_special_tokens=True,
+                    return_tensors="pt",
+                )
+                attention_mask = edit_input.attention_mask.to(device)
+
+                edit_prompt_embeds = self.text_encoder(
+                    edit_input.input_ids.to(device),
+                    attention_mask=attention_mask,
+                )
+                edit_prompt_embeds = edit_prompt_embeds[0]
+
         if do_classifier_free_guidance:
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = negative_prompt_embeds.shape[1]
@@ -525,10 +556,16 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
+            if editing_prompt is not None:
+                bs_embed_edit, seq_len_edit, _ = edit_prompt_embeds.shape
+                edit_prompt_embeds = edit_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+                edit_prompt_embeds = edit_prompt_embeds.view(bs_embed_edit * num_images_per_prompt, seq_len_edit, -1)
+
         else:
             negative_prompt_embeds = None
+            edit_prompt_embeds = None
 
-        return prompt_embeds, negative_prompt_embeds
+        return prompt_embeds, negative_prompt_embeds, edit_prompt_embeds
 
     # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.run_safety_checker
     def run_safety_checker(self, image, device, dtype):
@@ -700,11 +737,13 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
         timesteps: List[int] = None,
         guidance_scale: float = 4.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
+        editing_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        edit_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
@@ -712,6 +751,14 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         noise_level: int = 250,
         clean_caption: bool = True,
+        reverse_editing_direction: Optional[Union[bool, List[bool]]] = False,
+        edit_guidance_scale: Optional[Union[float, List[float]]] = 5,
+        edit_warmup_steps: Optional[Union[int, List[int]]] = 10,
+        edit_cooldown_steps: Optional[Union[int, List[int]]] = None,
+        edit_threshold: Optional[Union[float, List[float]]] = 0.9,
+        edit_momentum_scale: Optional[float] = 0.1,
+        edit_mom_beta: Optional[float] = 0.4,
+        edit_weights: Optional[List[float]] = None,
     ):
         """
         Function invoked when calling the pipeline for generation.
@@ -816,8 +863,21 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
+
+        if editing_prompt:
+            enable_edit_guidance = True
+            if isinstance(editing_prompt, str):
+                editing_prompt = [editing_prompt]
+            enabled_editing_prompts = len(editing_prompt)
+        elif edit_prompt_embeds is not None:
+            enable_edit_guidance = True
+            enabled_editing_prompts = int(edit_prompt_embeds.shape[0] / batch_size)
+        else:
+            enabled_editing_prompts = 0
+            enable_edit_guidance = False
+
         # 3. Encode input prompt
-        prompt_embeds, negative_prompt_embeds = self.encode_prompt(
+        prompt_embeds, negative_prompt_embeds, edit_prompt_embeds = self.encode_prompt(
             prompt,
             do_classifier_free_guidance,
             num_images_per_prompt=num_images_per_prompt,
@@ -825,11 +885,15 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
             negative_prompt=negative_prompt,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
+            edit_prompt_embeds=edit_prompt_embeds,
             clean_caption=clean_caption,
         )
 
         if do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            if enable_edit_guidance:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, edit_prompt_embeds])
+            else:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
 
         # 4. Prepare timesteps
         if timesteps is not None:
@@ -864,11 +928,14 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
         upscaled = self.image_noising_scheduler.add_noise(upscaled, noise, timesteps=noise_level)
 
         if do_classifier_free_guidance:
-            noise_level = torch.cat([noise_level] * 2)
+            noise_level = torch.cat([noise_level] * (2 + enabled_editing_prompts))
 
         # HACK: see comment in `enable_model_cpu_offload`
         if hasattr(self, "text_encoder_offload_hook") and self.text_encoder_offload_hook is not None:
             self.text_encoder_offload_hook.offload()
+
+        # Initialize edit_momentum to None
+        edit_momentum = None
 
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
@@ -876,9 +943,8 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
             for i, t in enumerate(timesteps):
                 model_input = torch.cat([intermediate_images, upscaled], dim=1)
 
-                model_input = torch.cat([model_input] * 2) if do_classifier_free_guidance else model_input
+                model_input = torch.cat([model_input] * (2 + enabled_editing_prompts)) if do_classifier_free_guidance else model_input
                 model_input = self.scheduler.scale_model_input(model_input, t)
-
                 # predict the noise residual
                 noise_pred = self.unet(
                     model_input,
@@ -891,10 +957,151 @@ class IFSuperResolutionPipeline(DiffusionPipeline):
 
                 # perform guidance
                 if do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred_out = noise_pred.chunk(2 + enabled_editing_prompts)  # [b,4, 64, 64]
+                    noise_pred_uncond, noise_pred_text = noise_pred_out[0], noise_pred_out[1]
                     noise_pred_uncond, _ = noise_pred_uncond.split(model_input.shape[1] // 2, dim=1)
                     noise_pred_text, predicted_variance = noise_pred_text.split(model_input.shape[1] // 2, dim=1)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                    # default text guidance
+                    noise_guidance = (noise_pred_text - noise_pred_uncond) * guidance_scale
+                    if edit_momentum is None:
+                        edit_momentum = torch.zeros_like(noise_guidance)
+
+                    if enable_edit_guidance:
+                        noise_pred_edit_concepts = noise_pred_out[2:]
+                        tmp = noise_pred_edit_concepts[0]
+                        tmp, _ = tmp.split(model_input.shape[1] // 2, dim=1)
+
+                        concept_weights = torch.zeros(
+                            (len(tmp), noise_guidance.shape[0]),
+                            device=edit_momentum.device,
+                            dtype=noise_guidance.dtype,
+                        )
+                        noise_guidance_edit = torch.zeros(
+                            (len(tmp), *noise_guidance.shape),
+                            device=edit_momentum.device,
+                            dtype=noise_guidance.dtype,
+                        )
+                        # noise_guidance_edit = torch.zeros_like(noise_guidance)
+                        warmup_inds = []
+                        for c, noise_pred_edit_concept in enumerate(noise_pred_edit_concepts):
+                            noise_pred_edit_concept, _ = noise_pred_edit_concept.split(model_input.shape[1] // 2, dim=1)
+                            if isinstance(edit_guidance_scale, list):
+                                edit_guidance_scale_c = edit_guidance_scale[c]
+                            else:
+                                edit_guidance_scale_c = edit_guidance_scale
+
+                            if isinstance(edit_threshold, list):
+                                edit_threshold_c = edit_threshold[c]
+                            else:
+                                edit_threshold_c = edit_threshold
+                            if isinstance(reverse_editing_direction, list):
+                                reverse_editing_direction_c = reverse_editing_direction[c]
+                            else:
+                                reverse_editing_direction_c = reverse_editing_direction
+                            if edit_weights:
+                                edit_weight_c = edit_weights[c]
+                            else:
+                                edit_weight_c = 1.0
+                            if isinstance(edit_warmup_steps, list):
+                                edit_warmup_steps_c = edit_warmup_steps[c]
+                            else:
+                                edit_warmup_steps_c = edit_warmup_steps
+
+                            if isinstance(edit_cooldown_steps, list):
+                                edit_cooldown_steps_c = edit_cooldown_steps[c]
+                            elif edit_cooldown_steps is None:
+                                edit_cooldown_steps_c = i + 1
+                            else:
+                                edit_cooldown_steps_c = edit_cooldown_steps
+                            if i >= edit_warmup_steps_c:
+                                warmup_inds.append(c)
+                            if i >= edit_cooldown_steps_c:
+                                noise_guidance_edit[c, :, :, :, :] = torch.zeros_like(noise_pred_edit_concept)
+                                continue
+
+                            noise_guidance_edit_tmp = noise_pred_edit_concept - noise_pred_uncond
+                            # tmp_weights = (noise_pred_text - noise_pred_edit_concept).sum(dim=(1, 2, 3))
+                            tmp_weights = (noise_guidance - noise_pred_edit_concept).sum(dim=(1, 2, 3))
+
+                            tmp_weights = torch.full_like(tmp_weights, edit_weight_c)  # * (1 / enabled_editing_prompts)
+                            if reverse_editing_direction_c:
+                                noise_guidance_edit_tmp = noise_guidance_edit_tmp * -1
+                            concept_weights[c, :] = tmp_weights
+
+                            noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
+
+                            # torch.quantile function expects float32
+                            if noise_guidance_edit_tmp.dtype == torch.float32:
+                                tmp = torch.quantile(
+                                    torch.abs(noise_guidance_edit_tmp).flatten(start_dim=2),
+                                    edit_threshold_c,
+                                    dim=2,
+                                    keepdim=False,
+                                )
+                            else:
+                                tmp = torch.quantile(
+                                    torch.abs(noise_guidance_edit_tmp).flatten(start_dim=2).to(torch.float32),
+                                    edit_threshold_c,
+                                    dim=2,
+                                    keepdim=False,
+                                ).to(noise_guidance_edit_tmp.dtype)
+
+                            noise_guidance_edit_tmp = torch.where(
+                                torch.abs(noise_guidance_edit_tmp) >= tmp[:, :, None, None],
+                                noise_guidance_edit_tmp,
+                                torch.zeros_like(noise_guidance_edit_tmp),
+                            )
+                            noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
+
+                            # noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
+
+                        warmup_inds = torch.tensor(warmup_inds).to(self.device)
+                        if len(noise_pred_edit_concepts) > warmup_inds.shape[0] > 0:
+                            concept_weights = concept_weights.to("cpu")  # Offload to cpu
+                            noise_guidance_edit = noise_guidance_edit.to("cpu")
+
+                            concept_weights_tmp = torch.index_select(concept_weights.to(self.device), 0, warmup_inds)
+                            concept_weights_tmp = torch.where(
+                                concept_weights_tmp < 0, torch.zeros_like(concept_weights_tmp), concept_weights_tmp
+                            )
+                            concept_weights_tmp = concept_weights_tmp / concept_weights_tmp.sum(dim=0)
+                            # concept_weights_tmp = torch.nan_to_num(concept_weights_tmp)
+
+                            noise_guidance_edit_tmp = torch.index_select(
+                                noise_guidance_edit.to(self.device), 0, warmup_inds
+                            )
+                            noise_guidance_edit_tmp = torch.einsum(
+                                "cb,cbijk->bijk", concept_weights_tmp, noise_guidance_edit_tmp
+                            )
+                            noise_guidance_edit_tmp = noise_guidance_edit_tmp
+                            noise_guidance = noise_guidance + noise_guidance_edit_tmp
+
+                            self.sem_guidance[i] = noise_guidance_edit_tmp.detach().cpu()
+
+                            del noise_guidance_edit_tmp
+                            del concept_weights_tmp
+                            concept_weights = concept_weights.to(self.device)
+                            noise_guidance_edit = noise_guidance_edit.to(self.device)
+
+                        concept_weights = torch.where(
+                            concept_weights < 0, torch.zeros_like(concept_weights), concept_weights
+                        )
+
+                        concept_weights = torch.nan_to_num(concept_weights)
+
+                        noise_guidance_edit = torch.einsum("cb,cbijk->bijk", concept_weights, noise_guidance_edit)
+
+                        noise_guidance_edit = noise_guidance_edit + edit_momentum_scale * edit_momentum
+
+                        edit_momentum = edit_mom_beta * edit_momentum + (1 - edit_mom_beta) * noise_guidance_edit
+
+                        if warmup_inds.shape[0] == len(noise_pred_edit_concepts):
+                            #print(noise_guidance.device, noise_guidance_edit.device)
+                            noise_guidance = noise_guidance + noise_guidance_edit
+
+
+                    noise_pred = noise_pred_uncond + noise_guidance
                     noise_pred = torch.cat([noise_pred, predicted_variance], dim=1)
 
                 # compute the previous noisy sample x_t -> x_t-1
