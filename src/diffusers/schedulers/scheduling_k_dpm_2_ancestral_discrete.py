@@ -1,4 +1,4 @@
-# Copyright 2022 Katherine Crowson, The HuggingFace Team and hlky. All rights reserved.
+# Copyright 2023 Katherine Crowson, The HuggingFace Team and hlky. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -20,6 +21,36 @@ import torch
 from ..configuration_utils import ConfigMixin, register_to_config
 from ..utils import randn_tensor
 from .scheduling_utils import KarrasDiffusionSchedulers, SchedulerMixin, SchedulerOutput
+
+
+# Copied from diffusers.schedulers.scheduling_ddpm.betas_for_alpha_bar
+def betas_for_alpha_bar(num_diffusion_timesteps, max_beta=0.999) -> torch.Tensor:
+    """
+    Create a beta schedule that discretizes the given alpha_t_bar function, which defines the cumulative product of
+    (1-beta) over time from t = [0,1].
+
+    Contains a function alpha_bar that takes an argument t and transforms it to the cumulative product of (1-beta) up
+    to that part of the diffusion process.
+
+
+    Args:
+        num_diffusion_timesteps (`int`): the number of betas to produce.
+        max_beta (`float`): the maximum beta to use; use values lower than 1 to
+                     prevent singularities.
+
+    Returns:
+        betas (`np.ndarray`): the betas used by the scheduler to step the model outputs
+    """
+
+    def alpha_bar(time_step):
+        return math.cos((time_step + 0.008) / 1.008 * math.pi / 2) ** 2
+
+    betas = []
+    for i in range(num_diffusion_timesteps):
+        t1 = i / num_diffusion_timesteps
+        t2 = (i + 1) / num_diffusion_timesteps
+        betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
+    return torch.tensor(betas, dtype=torch.float32)
 
 
 class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
@@ -71,6 +102,9 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
             self.betas = (
                 torch.linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps, dtype=torch.float32) ** 2
             )
+        elif beta_schedule == "squaredcos_cap_v2":
+            # Glide cosine schedule
+            self.betas = betas_for_alpha_bar(num_train_timesteps)
         else:
             raise NotImplementedError(f"{beta_schedule} does is not implemented for {self.__class__}")
 
@@ -80,8 +114,13 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         #  set all values
         self.set_timesteps(num_train_timesteps, None, num_train_timesteps)
 
-    def index_for_timestep(self, timestep):
-        indices = (self.timesteps == timestep).nonzero()
+    # Copied from diffusers.schedulers.scheduling_heun_discrete.HeunDiscreteScheduler.index_for_timestep
+    def index_for_timestep(self, timestep, schedule_timesteps=None):
+        if schedule_timesteps is None:
+            schedule_timesteps = self.timesteps
+
+        indices = (schedule_timesteps == timestep).nonzero()
+
         if self.state_in_first_order:
             pos = -1
         else:
@@ -161,16 +200,16 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         # standard deviation of the initial noise distribution
         self.init_noise_sigma = self.sigmas.max()
 
-        timesteps = torch.from_numpy(timesteps).to(device)
-        timesteps_interpol = self.sigma_to_t(sigmas_interpol).to(device)
-        interleaved_timesteps = torch.stack((timesteps_interpol[:-2, None], timesteps[1:, None]), dim=-1).flatten()
-        timesteps = torch.cat([timesteps[:1], interleaved_timesteps])
-
         if str(device).startswith("mps"):
             # mps does not support float64
-            self.timesteps = timesteps.to(device, dtype=torch.float32)
+            timesteps = torch.from_numpy(timesteps).to(device, dtype=torch.float32)
         else:
-            self.timesteps = timesteps
+            timesteps = torch.from_numpy(timesteps).to(device)
+
+        timesteps_interpol = self.sigma_to_t(sigmas_interpol).to(device, dtype=timesteps.dtype)
+        interleaved_timesteps = torch.stack((timesteps_interpol[:-2, None], timesteps[1:, None]), dim=-1).flatten()
+
+        self.timesteps = torch.cat([timesteps[:1], interleaved_timesteps])
 
         self.sample = None
 
@@ -254,6 +293,8 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
             pred_original_sample = model_output * (-sigma_input / (sigma_input**2 + 1) ** 0.5) + (
                 sample / (sigma_input**2 + 1)
             )
+        elif self.config.prediction_type == "sample":
+            raise NotImplementedError("prediction_type not implemented yet: sample")
         else:
             raise ValueError(
                 f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, or `v_prediction`"
@@ -287,6 +328,7 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         return SchedulerOutput(prev_sample=prev_sample)
 
+    # Copied from diffusers.schedulers.scheduling_heun_discrete.HeunDiscreteScheduler.add_noise
     def add_noise(
         self,
         original_samples: torch.FloatTensor,
@@ -294,18 +336,18 @@ class KDPM2AncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         timesteps: torch.FloatTensor,
     ) -> torch.FloatTensor:
         # Make sure sigmas and timesteps have the same device and dtype as original_samples
-        self.sigmas = self.sigmas.to(device=original_samples.device, dtype=original_samples.dtype)
+        sigmas = self.sigmas.to(device=original_samples.device, dtype=original_samples.dtype)
         if original_samples.device.type == "mps" and torch.is_floating_point(timesteps):
             # mps does not support float64
-            self.timesteps = self.timesteps.to(original_samples.device, dtype=torch.float32)
+            schedule_timesteps = self.timesteps.to(original_samples.device, dtype=torch.float32)
             timesteps = timesteps.to(original_samples.device, dtype=torch.float32)
         else:
-            self.timesteps = self.timesteps.to(original_samples.device)
+            schedule_timesteps = self.timesteps.to(original_samples.device)
             timesteps = timesteps.to(original_samples.device)
 
-        step_indices = [self.index_for_timestep(t) for t in timesteps]
+        step_indices = [self.index_for_timestep(t, schedule_timesteps) for t in timesteps]
 
-        sigma = self.sigmas[step_indices].flatten()
+        sigma = sigmas[step_indices].flatten()
         while len(sigma.shape) < len(original_samples.shape):
             sigma = sigma.unsqueeze(-1)
 

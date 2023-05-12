@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 HuggingFace Inc.
+# Copyright 2023 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ import unittest
 
 import numpy as np
 import torch
+from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
 from diffusers import (
     AutoencoderKL,
@@ -33,16 +34,19 @@ from diffusers import (
 )
 from diffusers.utils import load_numpy, nightly, slow, torch_device
 from diffusers.utils.testing_utils import CaptureLogger, require_torch_gpu
-from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
-from ...test_pipelines_common import PipelineTesterMixin
+from ..pipeline_params import TEXT_TO_IMAGE_BATCH_PARAMS, TEXT_TO_IMAGE_IMAGE_PARAMS, TEXT_TO_IMAGE_PARAMS
+from ..test_pipelines_common import PipelineLatentTesterMixin, PipelineTesterMixin
 
 
 torch.backends.cuda.matmul.allow_tf32 = False
 
 
-class StableDiffusion2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
+class StableDiffusion2PipelineFastTests(PipelineLatentTesterMixin, PipelineTesterMixin, unittest.TestCase):
     pipeline_class = StableDiffusionPipeline
+    params = TEXT_TO_IMAGE_PARAMS
+    batch_params = TEXT_TO_IMAGE_BATCH_PARAMS
+    image_params = TEXT_TO_IMAGE_IMAGE_PARAMS
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -56,7 +60,7 @@ class StableDiffusion2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
             cross_attention_dim=32,
             # SD2-specific config below
-            attention_head_dim=(2, 4, 8, 8),
+            attention_head_dim=(2, 4),
             use_linear_projection=True,
         )
         scheduler = DDIMScheduler(
@@ -131,7 +135,7 @@ class StableDiffusion2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.5649, 0.6022, 0.4804, 0.5270, 0.5585, 0.4643, 0.5159, 0.4963, 0.4793])
+        expected_slice = np.array([0.5753, 0.6113, 0.5005, 0.5036, 0.5464, 0.4725, 0.4982, 0.4865, 0.4861])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
@@ -148,7 +152,7 @@ class StableDiffusion2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.5099, 0.5677, 0.4671, 0.5128, 0.5697, 0.4676, 0.5277, 0.4964, 0.4946])
+        expected_slice = np.array([0.5121, 0.5714, 0.4827, 0.5057, 0.5646, 0.4766, 0.5189, 0.4895, 0.4990])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
@@ -165,7 +169,7 @@ class StableDiffusion2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.4717, 0.5376, 0.4568, 0.5225, 0.5734, 0.4797, 0.5467, 0.5074, 0.5043])
+        expected_slice = np.array([0.4865, 0.5439, 0.4840, 0.4995, 0.5543, 0.4846, 0.5199, 0.4942, 0.5061])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
@@ -182,7 +186,7 @@ class StableDiffusion2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.4715, 0.5376, 0.4569, 0.5224, 0.5734, 0.4797, 0.5465, 0.5074, 0.5046])
+        expected_slice = np.array([0.4864, 0.5440, 0.4842, 0.4994, 0.5543, 0.4846, 0.5196, 0.4942, 0.5063])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
@@ -199,7 +203,7 @@ class StableDiffusion2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.4717, 0.5376, 0.4568, 0.5225, 0.5734, 0.4797, 0.5467, 0.5074, 0.5043])
+        expected_slice = np.array([0.4865, 0.5439, 0.4840, 0.4995, 0.5543, 0.4846, 0.5199, 0.4942, 0.5061])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
@@ -392,6 +396,60 @@ class StableDiffusion2PipelineSlowTests(unittest.TestCase):
         mem_bytes = torch.cuda.max_memory_allocated()
         # make sure that less than 2.8 GB is allocated
         assert mem_bytes < 2.8 * 10**9
+
+    def test_stable_diffusion_pipeline_with_model_offloading(self):
+        torch.cuda.empty_cache()
+        torch.cuda.reset_max_memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+
+        inputs = self.get_inputs(torch_device, dtype=torch.float16)
+
+        # Normal inference
+
+        pipe = StableDiffusionPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-2-base",
+            torch_dtype=torch.float16,
+        )
+        pipe.unet.set_default_attn_processor()
+        pipe.to(torch_device)
+        pipe.set_progress_bar_config(disable=None)
+        outputs = pipe(**inputs)
+        mem_bytes = torch.cuda.max_memory_allocated()
+
+        # With model offloading
+
+        # Reload but don't move to cuda
+        pipe = StableDiffusionPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-2-base",
+            torch_dtype=torch.float16,
+        )
+        pipe.unet.set_default_attn_processor()
+
+        torch.cuda.empty_cache()
+        torch.cuda.reset_max_memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=None)
+        inputs = self.get_inputs(torch_device, dtype=torch.float16)
+        outputs_offloaded = pipe(**inputs)
+        mem_bytes_offloaded = torch.cuda.max_memory_allocated()
+
+        assert np.abs(outputs.images - outputs_offloaded.images).max() < 1e-3
+        assert mem_bytes_offloaded < mem_bytes
+        assert mem_bytes_offloaded < 3 * 10**9
+        for module in pipe.text_encoder, pipe.unet, pipe.vae:
+            assert module.device == torch.device("cpu")
+
+        # With attention slicing
+        torch.cuda.empty_cache()
+        torch.cuda.reset_max_memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+
+        pipe.enable_attention_slicing()
+        _ = pipe(**inputs)
+        mem_bytes_slicing = torch.cuda.max_memory_allocated()
+        assert mem_bytes_slicing < mem_bytes_offloaded
 
 
 @nightly

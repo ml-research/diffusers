@@ -1,11 +1,11 @@
 from typing import Optional, Tuple, Union
 
 import torch
+from einops import rearrange, reduce
 
 from diffusers import DDIMScheduler, DDPMScheduler, DiffusionPipeline, ImagePipelineOutput, UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMSchedulerOutput
 from diffusers.schedulers.scheduling_ddpm import DDPMSchedulerOutput
-from einops import rearrange, reduce
 
 
 BITS = 8
@@ -238,7 +238,7 @@ class BitDiffusion(DiffusionPipeline):
         **kwargs,
     ) -> Union[Tuple, ImagePipelineOutput]:
         latents = torch.randn(
-            (batch_size, self.unet.in_channels, height, width),
+            (batch_size, self.unet.config.in_channels, height, width),
             generator=generator,
         )
         latents = decimal_to_bits(latents) * self.bit_scale

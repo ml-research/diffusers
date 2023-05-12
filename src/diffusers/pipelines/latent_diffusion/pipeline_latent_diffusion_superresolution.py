@@ -2,10 +2,9 @@ import inspect
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
+import PIL
 import torch
 import torch.utils.checkpoint
-
-import PIL
 
 from ...models import UNet2DModel, VQModel
 from ...schedulers import (
@@ -16,13 +15,13 @@ from ...schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from ...utils import PIL_INTERPOLATION, deprecate, randn_tensor
+from ...utils import PIL_INTERPOLATION, randn_tensor
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 
 
 def preprocess(image):
     w, h = image.size
-    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    w, h = (x - x % 32 for x in (w, h))  # resize to integer multiple of 32
     image = image.resize((w, h), resample=PIL_INTERPOLATION["lanczos"])
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
@@ -73,7 +72,6 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        **kwargs,
     ) -> Union[Tuple, ImagePipelineOutput]:
         r"""
         Args:
@@ -101,10 +99,6 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
             [`~pipelines.ImagePipelineOutput`] or `tuple`: [`~pipelines.utils.ImagePipelineOutput`] if `return_dict` is
             True, otherwise a `tuple. When returning a tuple, the first element is a list with the generated images.
         """
-        message = "Please use `image` instead of `init_image`."
-        init_image = deprecate("init_image", "0.14.0", message, take_from=kwargs)
-        image = init_image or image
-
         if isinstance(image, PIL.Image.Image):
             batch_size = 1
         elif isinstance(image, torch.Tensor):
@@ -118,7 +112,7 @@ class LDMSuperResolutionPipeline(DiffusionPipeline):
         height, width = image.shape[-2:]
 
         # in_channels should be 6: 3 for latents, 3 for low resolution image
-        latents_shape = (batch_size, self.unet.in_channels // 2, height, width)
+        latents_shape = (batch_size, self.unet.config.in_channels // 2, height, width)
         latents_dtype = next(self.unet.parameters()).dtype
 
         latents = randn_tensor(latents_shape, generator=generator, device=self.device, dtype=latents_dtype)

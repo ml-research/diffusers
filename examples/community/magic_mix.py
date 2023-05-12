@@ -1,6 +1,10 @@
 from typing import Union
 
 import torch
+from PIL import Image
+from torchvision import transforms as tfms
+from tqdm.auto import tqdm
+from transformers import CLIPTextModel, CLIPTokenizer
 
 from diffusers import (
     AutoencoderKL,
@@ -10,10 +14,6 @@ from diffusers import (
     PNDMScheduler,
     UNet2DConditionModel,
 )
-from PIL import Image
-from torchvision import transforms as tfms
-from tqdm.auto import tqdm
-from transformers import CLIPTextModel, CLIPTokenizer
 
 
 class MagicMixPipeline(DiffusionPipeline):
@@ -93,7 +93,7 @@ class MagicMixPipeline(DiffusionPipeline):
 
         torch.manual_seed(seed)
         noise = torch.randn(
-            (1, self.unet.in_channels, height // 8, width // 8),
+            (1, self.unet.config.in_channels, height // 8, width // 8),
         ).to(self.device)
 
         latents = self.scheduler.add_noise(

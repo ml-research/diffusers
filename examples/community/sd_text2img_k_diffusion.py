@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,11 +17,11 @@ import warnings
 from typing import Callable, List, Optional, Union
 
 import torch
+from k_diffusion.external import CompVisDenoiser, CompVisVDenoiser
 
 from diffusers import DiffusionPipeline, LMSDiscreteScheduler
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.utils import is_accelerate_available, logging
-from k_diffusion.external import CompVisDenoiser, CompVisVDenoiser
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -65,7 +65,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         safety_checker ([`StableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offensive or harmful.
             Please, refer to the [model card](https://huggingface.co/runwayml/stable-diffusion-v1-5) for details.
-        feature_extractor ([`CLIPFeatureExtractor`]):
+        feature_extractor ([`CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
     _optional_components = ["safety_checker", "feature_extractor"]
@@ -105,7 +105,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         )
 
         model = ModelWrapper(unet, scheduler.alphas_cumprod)
-        if scheduler.prediction_type == "v_prediction":
+        if scheduler.config.prediction_type == "v_prediction":
             self.k_diffusion_model = CompVisVDenoiser(model)
         else:
             self.k_diffusion_model = CompVisDenoiser(model)
@@ -300,7 +300,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
         image = (image / 2 + 0.5).clamp(0, 1)
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
         return image
 
@@ -351,7 +351,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-        callback_steps: Optional[int] = 1,
+        callback_steps: int = 1,
         **kwargs,
     ):
         r"""
@@ -433,7 +433,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         sigmas = sigmas.to(text_embeddings.dtype)
 
         # 5. Prepare latent variables
-        num_channels_latents = self.unet.in_channels
+        num_channels_latents = self.unet.config.in_channels
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,

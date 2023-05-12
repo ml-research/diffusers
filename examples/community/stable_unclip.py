@@ -2,13 +2,13 @@ import types
 from typing import List, Optional, Tuple, Union
 
 import torch
+from transformers import CLIPTextModelWithProjection, CLIPTokenizer
+from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 
 from diffusers.models import PriorTransformer
 from diffusers.pipelines import DiffusionPipeline, StableDiffusionImageVariationPipeline
 from diffusers.schedulers import UnCLIPScheduler
 from diffusers.utils import logging, randn_tensor
-from transformers import CLIPTextModelWithProjection, CLIPTokenizer
-from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -46,7 +46,7 @@ class StableUnCLIPPipeline(DiffusionPipeline):
     ):
         super().__init__()
 
-        decoder_pipe_kwargs = dict(image_encoder=None) if decoder_pipe_kwargs is None else decoder_pipe_kwargs
+        decoder_pipe_kwargs = {"image_encoder": None} if decoder_pipe_kwargs is None else decoder_pipe_kwargs
 
         decoder_pipe_kwargs["torch_dtype"] = decoder_pipe_kwargs.get("torch_dtype", None) or prior.dtype
 

@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 HuggingFace Inc.
+# Copyright 2023 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import unittest
 
 import numpy as np
 import torch
+from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
 from diffusers import (
     AutoencoderKL,
@@ -30,7 +31,6 @@ from diffusers import (
 )
 from diffusers.utils import load_numpy, slow, torch_device
 from diffusers.utils.testing_utils import require_torch_gpu
-from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -56,7 +56,7 @@ class StableDiffusion2VPredictionPipelineFastTests(unittest.TestCase):
             up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
             cross_attention_dim=32,
             # SD2-specific config below
-            attention_head_dim=(2, 4, 8, 8),
+            attention_head_dim=(2, 4),
             use_linear_projection=True,
         )
         return model
@@ -144,7 +144,7 @@ class StableDiffusion2VPredictionPipelineFastTests(unittest.TestCase):
         image_from_tuple_slice = image_from_tuple[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.6424, 0.6109, 0.494, 0.5088, 0.4984, 0.4525, 0.5059, 0.5068, 0.4474])
+        expected_slice = np.array([0.6569, 0.6525, 0.5142, 0.4968, 0.4923, 0.4601, 0.4996, 0.5041, 0.4544])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
         assert np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2
@@ -193,7 +193,7 @@ class StableDiffusion2VPredictionPipelineFastTests(unittest.TestCase):
         image_from_tuple_slice = image_from_tuple[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.4616, 0.5184, 0.4887, 0.5111, 0.4839, 0.48, 0.5119, 0.5263, 0.4776])
+        expected_slice = np.array([0.5644, 0.6514, 0.5190, 0.5663, 0.5287, 0.4953, 0.5430, 0.5243, 0.4778])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
         assert np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2

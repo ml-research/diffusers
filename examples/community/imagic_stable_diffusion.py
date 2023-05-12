@@ -7,22 +7,22 @@ import warnings
 from typing import List, Optional, Union
 
 import numpy as np
+import PIL
 import torch
 import torch.nn.functional as F
-
-import PIL
 from accelerate import Accelerator
+
+# TODO: remove and import from diffusers.utils when the new version of diffusers is released
+from packaging import version
+from tqdm.auto import tqdm
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
+
 from diffusers import DiffusionPipeline
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
-from diffusers.utils import deprecate, logging
-
-# TODO: remove and import from diffusers.utils when the new version of diffusers is released
-from packaging import version
-from tqdm.auto import tqdm
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from diffusers.utils import logging
 
 
 if version.parse(version.parse(PIL.__version__).base_version) >= version.parse("9.1.0"):
@@ -48,7 +48,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 def preprocess(image):
     w, h = image.size
-    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    w, h = (x - x % 32 for x in (w, h))  # resize to integer multiple of 32
     image = image.resize((w, h), resample=PIL_INTERPOLATION["lanczos"])
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
@@ -80,7 +80,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         safety_checker ([`StableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offsensive or harmful.
             Please, refer to the [model card](https://huggingface.co/CompVis/stable-diffusion-v1-4) for details.
-        feature_extractor ([`CLIPFeatureExtractor`]):
+        feature_extractor ([`CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
 
@@ -92,7 +92,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         unet: UNet2DConditionModel,
         scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
         safety_checker: StableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
     ):
         super().__init__()
         self.register_modules(
@@ -184,10 +184,6 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             list of `bool`s denoting whether the corresponding generated image likely represents "not-safe-for-work"
             (nsfw) content, according to the `safety_checker`.
         """
-        message = "Please use `image` instead of `init_image`."
-        init_image = deprecate("init_image", "0.14.0", message, take_from=kwargs)
-        image = init_image or image
-
         accelerator = Accelerator(
             gradient_accumulation_steps=1,
             mixed_precision="fp16",
@@ -346,7 +342,6 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         return_dict: bool = True,
         guidance_scale: float = 7.5,
         eta: float = 0.0,
-        **kwargs,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -429,7 +424,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         # Unlike in other pipelines, latents need to be generated in the target device
         # for 1-to-1 results reproducibility with the CompVis implementation.
         # However this currently doesn't work in `mps`.
-        latents_shape = (1, self.unet.in_channels, height // 8, width // 8)
+        latents_shape = (1, self.unet.config.in_channels, height // 8, width // 8)
         latents_dtype = text_embeddings.dtype
         if self.device.type == "mps":
             # randn does not exist on mps
@@ -479,7 +474,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
 
         image = (image / 2 + 0.5).clamp(0, 1)
 
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
         if self.safety_checker is not None:
