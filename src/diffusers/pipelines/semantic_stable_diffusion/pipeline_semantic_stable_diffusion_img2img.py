@@ -12,7 +12,7 @@ from ...configuration_utils import FrozenDict
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...pipeline_utils import DiffusionPipeline
 from ...pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from ...schedulers import KarrasDiffusionSchedulers
+from ...schedulers import KarrasDiffusionSchedulers, DDIMInverseScheduler
 from ...utils import deprecate, logging
 from . import SemanticStableDiffusionPipelineOutput
 
@@ -28,7 +28,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 def load_512(image_path, left=0, right=0, top=0, bottom=0):
     if type(image_path) is str:
-        image = np.array(Image.open(image_path))[:, :, :3]
+        image = np.array(Image.open(image_path).convert('RGB'))[:, :, :3]
     else:
         image = image_path
     h, w, c = image.shape
@@ -87,6 +87,7 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
             tokenizer: CLIPTokenizer,
             unet: UNet2DConditionModel,
             scheduler: KarrasDiffusionSchedulers,
+            inverse_scheduler: DDIMInverseScheduler,
             safety_checker: StableDiffusionSafetyChecker,
             feature_extractor: CLIPImageProcessor,
             requires_safety_checker: bool = True,
@@ -163,6 +164,7 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
+            inverse_scheduler=inverse_scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
         )
@@ -233,8 +235,8 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, latents):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
 
-        if self.init_latents.shape != shape:
-            raise ValueError(f"Unexpected latents shape, got {self.init_latents.shape}, expected {latents_shape}")
+        if latents.shape != shape:
+            raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
 
         latents = latents.to(device)
 
@@ -458,6 +460,7 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
                 warmup_inds = []
                 for c, noise_pred_edit_concept in enumerate(noise_pred_edit_concepts):
 
+                    # 1. get SEGA parameters for concept
                     if isinstance(edit_guidance_scale, list):
                         edit_guidance_scale_c = edit_guidance_scale[c]
                     else:
@@ -488,18 +491,17 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
                         edit_cooldown_steps_c = edit_cooldown_steps
                     if i >= edit_warmup_steps_c:
                         warmup_inds.append(c)
+
+                    # 2. no semantic guidance for cooldown steps
                     if i >= edit_cooldown_steps_c:
                         noise_guidance_edit[c, :, :, :, :] = torch.zeros_like(noise_pred_edit_concept)
                         continue
 
+                    # 3. semantic guidance term
                     noise_guidance_edit_tmp = noise_pred_edit_concept - noise_pred_uncond
-                    # tmp_weights = (noise_pred_text - noise_pred_edit_concept).sum(dim=(1, 2, 3))
-                    tmp_weights = (noise_guidance - noise_pred_edit_concept).sum(dim=(1, 2, 3))
 
-                    tmp_weights = torch.full_like(tmp_weights, edit_weight_c)  # * (1 / enabled_editing_prompts)
                     if reverse_editing_direction_c:
                         noise_guidance_edit_tmp = noise_guidance_edit_tmp * -1
-                    concept_weights[c, :] = tmp_weights
 
                     noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
 
@@ -526,7 +528,8 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
                     )
                     noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
 
-                    # noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
+                    # 4. weighting factor for different concepts
+                    concept_weights[c, :] = torch.full((1,noise_guidance.shape[0]), edit_weight_c) # * (1 / enabled_editing_prompts)
 
                 warmup_inds = torch.tensor(warmup_inds).to(self.device)
                 if len(noise_pred_edit_concepts) > warmup_inds.shape[0] > 0:
@@ -577,7 +580,7 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
 
                 noise_pred = noise_pred_uncond + noise_guidance
 
-                # compute the previous noisy sample x_t -> x_t-1
+            # compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
             # call the callback, if provided
@@ -640,57 +643,52 @@ class SemanticStableDiffusionImg2ImgPipeline(DiffusionPipeline):
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
         return image
 
-    def get_noise_pred_single(self, latents, t, context):
-        noise_pred = self.unet(latents, t, encoder_hidden_states=context)["sample"]
-        return noise_pred
-
-    def next_step(self, model_output: Union[torch.FloatTensor, np.ndarray], timestep: int,
-                  sample: Union[torch.FloatTensor, np.ndarray]):
-        # TODO: use DDIMInverseScheduler instead
-        timestep, next_timestep = min(
-            timestep - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps, 999), timestep
-        alpha_prod_t = self.scheduler.alphas_cumprod[timestep] if timestep >= 0 else self.scheduler.final_alpha_cumprod
-        alpha_prod_t_next = self.scheduler.alphas_cumprod[next_timestep]
-        beta_prod_t = 1 - alpha_prod_t
-
-        # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-        next_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
-
-        # "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * model_output
-
-        next_sample = alpha_prod_t_next ** 0.5 * next_original_sample + next_sample_direction
-        return next_sample
-
     @torch.no_grad()
-    def ddim_loop(self, latent):
+    def ddim_loop(self, latent, skip_first_step):
         uncond_embeddings = self.get_uncond_embeddings()
         all_latent = [latent]
         latent = latent.clone().detach()
-        for i in range(self.num_inversion_steps):
-            t = self.scheduler.timesteps[len(self.scheduler.timesteps) - i - 1]
-            noise_pred = self.get_noise_pred_single(latent, t, uncond_embeddings)
-            latent = self.next_step(noise_pred, t, latent)
-            all_latent.append(latent)
-        return all_latent
+        noise_preds = []
+
+        timesteps = self.inverse_scheduler.timesteps
+        for i, t in enumerate(timesteps):
+            if i == 0 and skip_first_step:
+                # skipping the first step is beneficial for DDIM inversion
+                continue
+
+            # predict the noise residual
+            noise_pred = self.unet(latent, t, encoder_hidden_states=uncond_embeddings)["sample"]
+
+            # compute the next noisy sample x_t -> x_t+1
+            latent = self.inverse_scheduler.step(noise_pred, t, latent).prev_sample
+
+            all_latent.append(latent.detach().clone())
+            noise_preds.append(noise_pred.detach().clone())
+        return all_latent, noise_preds
 
     @torch.no_grad()
-    def ddim_inversion(self, image):
-        latent = self.image2latent(image)
+    def ddim_inversion(self, image_path, offsets, skip_first_step):
+        image_gt = load_512(image_path, *offsets)
+        latent = self.image2latent(image_gt)
         image_rec = self.decode_latents(latent)
-        ddim_latents = self.ddim_loop(latent)
-        return image_rec, ddim_latents
+        ddim_latents, noise_preds = self.ddim_loop(latent, skip_first_step)
+        return image_gt, image_rec, ddim_latents, noise_preds
 
-    def invert(self, image_path: str, offsets=(0, 0, 0, 0), verbose=False,
-               num_inverstion_steps: int = 50):
+    def invert(self, image_path: str, skip_first_step: bool, offsets=(0, 0, 0, 0), verbose=False,
+               num_inverstion_steps: int = 50, return_all_latents=False, return_noise_preds=False):
+
         self.num_inversion_steps = num_inverstion_steps
         self.scheduler.set_timesteps(self.num_inversion_steps)
+        self.inverse_scheduler.set_timesteps(self.num_inversion_steps)
 
-        # ptp_utils.register_attention_control(self.model, None)
-        image_gt = load_512(image_path, *offsets)
         if verbose:
             print("DDIM inversion...")
-        image_rec, ddim_latents = self.ddim_inversion(image_gt)
+        image_gt, image_rec, ddim_latents, noise_preds = self.ddim_inversion(image_path, offsets, skip_first_step)
         self.init_latents = ddim_latents[-1]
+
+        if return_all_latents:
+            return (image_gt, image_rec), ddim_latents
+        if return_noise_preds:
+            return noise_preds
         return (image_gt, image_rec), ddim_latents[-1]
 
