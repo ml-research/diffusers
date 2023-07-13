@@ -777,6 +777,10 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         # 1. encode image
         x0 = self.encode_image(image_path)
 
+        # autoencoder reconstruction
+        image_rec = self.vae.decode(x0 / self.vae.config.scaling_factor, return_dict=False)[0]
+        image_rec = self.image_processor.postprocess(image_rec, output_type="pil")
+
         # 2. find zs and xts
         if not source_prompt == "":
             text_embeddings = self.encode_text(source_prompt)
@@ -787,9 +791,6 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
             self.unet.config.in_channels,
             self.unet.sample_size,
             self.unet.sample_size)
-
-        if type(self.eta) in [int, float]:
-            etas = [self.eta] * self.scheduler.num_inference_steps
 
         # intermediate latents
         t_to_idx = {int(v):k for k,v in enumerate(timesteps)}
@@ -804,49 +805,33 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         # noise maps
         zs = torch.zeros(size=variance_noise_shape, device=self.device)
 
-        xt = x0
         for t in tqdm(reversed(timesteps)):
             idx = t_to_idx[int(t)]
             # 1. predict noise residual
             xt = xts[idx][None]
 
-            out = self.unet.forward(xt, timestep=t, encoder_hidden_states=uncond_embedding)
-            if not source_prompt == "":
-                cond_out = self.unet.forward(xt, timestep=t, encoder_hidden_states=text_embeddings)
+            noise_pred = self.unet(xt, timestep=t, encoder_hidden_states=uncond_embedding).sample
 
             if not source_prompt == "":
-                noise_pred = out.sample + source_guidance_scale * (cond_out.sample - out.sample)
-            else:
-                noise_pred = out.sample
+                noise_pred_cond = self.unet(xt, timestep=t, encoder_hidden_states=text_embeddings).sample
+                noise_pred = noise_pred + source_guidance_scale * (noise_pred_cond - noise_pred)
 
             xtm1 =  xts[idx+1][None]
-            # pred of x0
-            pred_original_sample = (xt - (1-alpha_bar[t])  ** 0.5 * noise_pred ) / alpha_bar[t] ** 0.5
-
-            # direction to xt
-            prev_timestep = t - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps
-            alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.scheduler.final_alpha_cumprod
-
-            variance = self.scheduler._get_variance(t, prev_timestep)
-            pred_sample_direction = (1 - alpha_prod_t_prev - etas[idx] * variance ) ** (0.5) * noise_pred
-
-            mu_xt = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
-
-            z = (xtm1 - mu_xt ) / ( etas[idx] * variance ** 0.5 )
+            z, xtm1_corrected = compute_noise(self.scheduler, xtm1, xt, t, noise_pred, eta)
             zs[idx] = z
 
             # correction to avoid error accumulation
-            xtm1 = mu_xt + ( etas[idx] * variance ** 0.5 )*z
-            xts[idx+1] = xtm1
+            xts[idx+1] = xtm1_corrected
 
-        if not zs is None:
-            zs[-1] = torch.zeros_like(zs[-1])
+        # TODO: I don't think that the noise map for the last step should be discarded ?!
+        # if not zs is None:
+        #     zs[-1] = torch.zeros_like(zs[-1])
 
         self.init_latents = xts[skip_steps].expand(1, -1, -1, -1)
         self.zs = zs[skip_steps:]
         self.wts = xts
 
-        return zs, xts
+        return zs, xts, image_rec
 
     @torch.no_grad()
     def encode_image(self, image_path):
@@ -854,3 +839,38 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         x0 = self.vae.encode(image).latent_dist.mode()
         x0 = self.vae.config.scaling_factor * x0
         return x0
+
+# Copied from pipelines.StableDiffusion.CycleDiffusionPipeline.compute_noise
+def compute_noise(scheduler, prev_latents, latents, timestep, noise_pred, eta):
+    # 1. get previous step value (=t-1)
+    prev_timestep = timestep - scheduler.config.num_train_timesteps // scheduler.num_inference_steps
+
+    # 2. compute alphas, betas
+    alpha_prod_t = scheduler.alphas_cumprod[timestep]
+    alpha_prod_t_prev = (
+        scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else scheduler.final_alpha_cumprod
+    )
+
+    beta_prod_t = 1 - alpha_prod_t
+
+    # 3. compute predicted original sample from predicted noise also called
+    # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+    pred_original_sample = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+
+    # 4. Clip "predicted x_0"
+    if scheduler.config.clip_sample:
+        pred_original_sample = torch.clamp(pred_original_sample, -1, 1)
+
+    # 5. compute variance: "sigma_t(η)" -> see formula (16)
+    # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
+    variance = scheduler._get_variance(timestep, prev_timestep)
+    std_dev_t = eta * variance ** (0.5)
+
+    # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+    pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * noise_pred
+
+    # modifed so that updated xtm1 is returned as well (to avoid error accumulation)
+    mu_xt = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
+    noise = (prev_latents - mu_xt) / (variance ** (0.5) * eta)
+
+    return noise, mu_xt + ( eta * variance ** 0.5 )*noise
