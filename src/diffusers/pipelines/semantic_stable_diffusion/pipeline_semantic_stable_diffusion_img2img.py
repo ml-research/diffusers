@@ -778,15 +778,12 @@ def register_attention_control_efficient(model, injection_schedule):
                 # inject unconditional
                 q[source_batch_size:2 * source_batch_size] = q[:source_batch_size]
                 k[source_batch_size:2 * source_batch_size] = k[:source_batch_size]
-                # inject conditional
-                q[2 * source_batch_size:3 * source_batch_size] = q[:source_batch_size]
-                k[2 * source_batch_size:3 * source_batch_size] = k[:source_batch_size]
 
                 if editing_prompts > 0:
                     # inject editing
                     for i in range(editing_prompts):
-                        q[(3+i) * source_batch_size: (4+i) * source_batch_size] = q[:source_batch_size]
-                        k[(3+i) * source_batch_size: (4+i) * source_batch_size] = k[:source_batch_size]
+                        q[(2+i) * source_batch_size: (3+i) * source_batch_size] = q[:source_batch_size]
+                        k[(2+i) * source_batch_size: (3+i) * source_batch_size] = k[:source_batch_size]
 
                 q = self.head_to_batch_dim(q)
                 k = self.head_to_batch_dim(k)

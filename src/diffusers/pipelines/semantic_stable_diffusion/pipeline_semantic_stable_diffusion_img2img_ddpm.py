@@ -264,6 +264,9 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         #use_ddpm: bool = False,
         #wts: Optional[List[torch.Tensor]] = None,
         #zs: Optional[List[torch.Tensor]] = None
+        PnP: bool = True,
+        pnp_f_strength: float = 0.4,
+        pnp_attn_strength: float = 0.2,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -381,13 +384,18 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
             enable_edit_guidance = True
             if isinstance(editing_prompt, str):
                 editing_prompt = [editing_prompt]
-            enabled_editing_prompts = len(editing_prompt)
+            self.enabled_editing_prompts = len(editing_prompt)
         elif editing_prompt_embeddings is not None:
             enable_edit_guidance = True
-            enabled_editing_prompts = editing_prompt_embeddings.shape[0]
+            self.enabled_editing_prompts = editing_prompt_embeddings.shape[0]
         else:
-            enabled_editing_prompts = 0
+            self.enabled_editing_prompts = 0
             enable_edit_guidance = False
+
+            if PnP:
+                # there is no prediction for which features can be injected
+                logger.warning("PnP is disabled because PnP requires at least one editing prompt.")
+                PnP = False
 
         # get prompt text embeddings
         text_inputs = self.tokenizer(
@@ -491,12 +499,40 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
             else:
                 text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
+            if PnP:
+                # Plug-and_Play specific
+                uncond_tokens = [""]
+
+                uncond_input = self.tokenizer(
+                    uncond_tokens,
+                    padding="max_length",
+                    max_length=self.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                pnp_guidance_embeds = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
+
+                seq_len = pnp_guidance_embeds.shape[1]
+                pnp_guidance_embeds = pnp_guidance_embeds.repeat(batch_size, num_images_per_prompt, 1)
+                pnp_guidance_embeds = pnp_guidance_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=self.device)
         timesteps = self.scheduler.timesteps
         if use_ddpm:
           t_to_idx = {int(v):k for k,v in enumerate(timesteps[-zs.shape[0]:])}
           timesteps = timesteps[-zs.shape[0]:]
+
+        if PnP:
+            pnp_f_t = int(len(timesteps) * pnp_f_strength)
+            pnp_attn_t = int(len(timesteps) * pnp_attn_strength)
+
+            qk_injection_timesteps = self.scheduler.timesteps[:pnp_attn_t] if pnp_attn_t >= 0 else []
+            conv_injection_timesteps = self.scheduler.timesteps[:pnp_f_t] if pnp_f_t >= 0 else []
+
+            register_attention_control_efficient(self, qk_injection_timesteps)
+            register_conv_control_efficient(self, conv_injection_timesteps)
+
 
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
@@ -523,20 +559,42 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         self.sem_guidance = None
 
         for i, t in enumerate(self.progress_bar(timesteps)):
+            idx = t_to_idx[int(t)]
+            source_latents = self.latents_path[idx][None]
+
             # expand the latents if we are doing classifier free guidance
-            latent_model_input = (
-                torch.cat([latents] * (2 + enabled_editing_prompts)) if do_classifier_free_guidance else latents
-            )
+            if PnP and do_classifier_free_guidance:
+                latent_model_input = torch.cat([source_latents] + [latents] * (2 + self.enabled_editing_prompts))
+            elif do_classifier_free_guidance:
+                latent_model_input = torch.cat([latents] * (2 + self.enabled_editing_prompts))
+            else:
+                latent_model_input = latents
+
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
+            if PnP:
+                # register the time step and features in pnp injection modules
+                register_time(self, t.item())
+
+            text_embed_input = (
+                torch.cat([pnp_guidance_embeds, text_embeddings], dim=0)
+                if PnP
+                else text_embeddings
+            )
+
             # predict the noise residual
-            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embed_input).sample
 
             # perform guidance
             if do_classifier_free_guidance:
-                noise_pred_out = noise_pred.chunk(2 + enabled_editing_prompts)  # [b,4, 64, 64]
-                noise_pred_uncond, noise_pred_text = noise_pred_out[0], noise_pred_out[1]
-                noise_pred_edit_concepts = noise_pred_out[2:]
+                if PnP:
+                    noise_pred_out = noise_pred.chunk(3 + self.enabled_editing_prompts)  # [b,4, 64, 64]
+                    noise_pred_uncond, noise_pred_text = noise_pred_out[1], noise_pred_out[2]
+                    noise_pred_edit_concepts = noise_pred_out[3:]
+                else:
+                    noise_pred_out = noise_pred.chunk(2 + self.enabled_editing_prompts)  # [b,4, 64, 64]
+                    noise_pred_uncond, noise_pred_text = noise_pred_out[0], noise_pred_out[1]
+                    noise_pred_edit_concepts = noise_pred_out[2:]
 
                 # default text guidance
                 noise_guidance = guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -830,7 +888,7 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         self.init_latents = xts[skip_steps].expand(1, -1, -1, -1)
         self.zs = zs[skip_steps:]
         self.wts = xts
-
+        self.latents_path = xts[skip_steps:]
         return zs, xts, image_rec
 
     @torch.no_grad()
@@ -874,3 +932,160 @@ def compute_noise(scheduler, prev_latents, latents, timestep, noise_pred, eta):
     noise = (prev_latents - mu_xt) / (variance ** (0.5) * eta)
 
     return noise, mu_xt + ( eta * variance ** 0.5 )*noise
+
+# Copied and slightly modified from https://github.com/MichalGeyer/pnp-diffusers
+def register_attention_control_efficient(model, injection_schedule):
+    def sa_forward(self):
+        to_out = self.to_out
+        if type(to_out) is torch.nn.modules.container.ModuleList:
+            to_out = self.to_out[0]
+        else:
+            to_out = self.to_out
+
+        # modified
+        editing_prompts = model.enabled_editing_prompts
+
+        def forward(x, encoder_hidden_states=None, attention_mask=None):
+            batch_size, sequence_length, dim = x.shape
+            h = self.heads
+
+            is_cross = encoder_hidden_states is not None
+            encoder_hidden_states = encoder_hidden_states if is_cross else x
+            if not is_cross and self.injection_schedule is not None and (
+                    self.t in self.injection_schedule or self.t == 1000):
+                q = self.to_q(x)
+                k = self.to_k(encoder_hidden_states)
+
+                source_batch_size = int(q.shape[0] // (2 + editing_prompts))
+
+                # inject unconditional
+                q[source_batch_size:2 * source_batch_size] = q[:source_batch_size]
+                k[source_batch_size:2 * source_batch_size] = k[:source_batch_size]
+                # inject conditional
+                q[2 * source_batch_size:3 * source_batch_size] = q[:source_batch_size]
+                k[2 * source_batch_size:3 * source_batch_size] = k[:source_batch_size]
+
+                if editing_prompts > 0:
+                    # inject editing
+                    for i in range(editing_prompts):
+                        q[(3+i) * source_batch_size: (4+i) * source_batch_size] = q[:source_batch_size]
+                        k[(3+i) * source_batch_size: (4+i) * source_batch_size] = k[:source_batch_size]
+
+                q = self.head_to_batch_dim(q)
+                k = self.head_to_batch_dim(k)
+            else:
+                q = self.to_q(x)
+                k = self.to_k(encoder_hidden_states)
+                q = self.head_to_batch_dim(q)
+                k = self.head_to_batch_dim(k)
+
+            v = self.to_v(encoder_hidden_states)
+            v = self.head_to_batch_dim(v)
+
+            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
+
+            if attention_mask is not None:
+                attention_mask = attention_mask.reshape(batch_size, -1)
+                max_neg_value = -torch.finfo(sim.dtype).max
+                attention_mask = attention_mask[:, None, :].repeat(h, 1, 1)
+                sim.masked_fill_(~attention_mask, max_neg_value)
+
+            # attention, what we cannot get enough of
+            attn = sim.softmax(dim=-1)
+            out = torch.einsum("b i j, b j d -> b i d", attn, v)
+            out = self.batch_to_head_dim(out)
+
+            return to_out(out)
+
+        return forward
+
+    res_dict = {1: [1, 2], 2: [0, 1, 2], 3: [0, 1, 2]}  # we are injecting attention in blocks 4 - 11 of the decoder, so not in the first block of the lowest resolution
+    for res in res_dict:
+        for block in res_dict[res]:
+            module = model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
+            module.forward = sa_forward(module)
+            setattr(module, 'injection_schedule', injection_schedule)
+
+# Copied and slightly modified from https://github.com/MichalGeyer/pnp-diffusers
+def register_conv_control_efficient(model, injection_schedule):
+    def conv_forward(self):
+        # modified
+        editing_prompts = model.enabled_editing_prompts
+
+        def forward(input_tensor, temb):
+            hidden_states = input_tensor
+
+            hidden_states = self.norm1(hidden_states)
+            hidden_states = self.nonlinearity(hidden_states)
+
+            if self.upsample is not None:
+                # upsample_nearest_nhwc fails with large batch sizes. see https://github.com/huggingface/diffusers/issues/984
+                if hidden_states.shape[0] >= 64:
+                    input_tensor = input_tensor.contiguous()
+                    hidden_states = hidden_states.contiguous()
+                input_tensor = self.upsample(input_tensor)
+                hidden_states = self.upsample(hidden_states)
+            elif self.downsample is not None:
+                input_tensor = self.downsample(input_tensor)
+                hidden_states = self.downsample(hidden_states)
+
+            hidden_states = self.conv1(hidden_states)
+
+            if temb is not None:
+                temb = self.time_emb_proj(self.nonlinearity(temb))[:, :, None, None]
+
+            if temb is not None and self.time_embedding_norm == "default":
+                hidden_states = hidden_states + temb
+
+            hidden_states = self.norm2(hidden_states)
+
+            if temb is not None and self.time_embedding_norm == "scale_shift":
+                scale, shift = torch.chunk(temb, 2, dim=1)
+                hidden_states = hidden_states * (1 + scale) + shift
+
+            hidden_states = self.nonlinearity(hidden_states)
+
+            hidden_states = self.dropout(hidden_states)
+            hidden_states = self.conv2(hidden_states)
+            if self.injection_schedule is not None and (self.t in self.injection_schedule or self.t == 1000):
+                source_batch_size = int(hidden_states.shape[0] // (2 + editing_prompts))
+
+                # inject unconditional
+                hidden_states[source_batch_size:2 * source_batch_size] = hidden_states[:source_batch_size]
+                # inject conditional
+                hidden_states[2 * source_batch_size:3 * source_batch_size] = hidden_states[:source_batch_size]
+
+                if editing_prompts > 0:
+                    # inject editing
+                    for i in range(editing_prompts):
+                        hidden_states[(3+i) * source_batch_size:(4+i) * source_batch_size] = hidden_states[:source_batch_size]
+
+            if self.conv_shortcut is not None:
+                input_tensor = self.conv_shortcut(input_tensor)
+
+            output_tensor = (input_tensor + hidden_states) / self.output_scale_factor
+
+            return output_tensor
+
+        return forward
+
+    conv_module = model.unet.up_blocks[1].resnets[1]
+    conv_module.forward = conv_forward(conv_module)
+    setattr(conv_module, 'injection_schedule', injection_schedule)
+
+# Copied from https://github.com/MichalGeyer/pnp-diffusers
+def register_time(model, t):
+    conv_module = model.unet.up_blocks[1].resnets[1]
+    setattr(conv_module, 't', t)
+    down_res_dict = {0: [0, 1], 1: [0, 1], 2: [0, 1]}
+    up_res_dict = {1: [0, 1, 2], 2: [0, 1, 2], 3: [0, 1, 2]}
+    for res in up_res_dict:
+        for block in up_res_dict[res]:
+            module = model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
+            setattr(module, 't', t)
+    for res in down_res_dict:
+        for block in down_res_dict[res]:
+            module = model.unet.down_blocks[res].attentions[block].transformer_blocks[0].attn1
+            setattr(module, 't', t)
+    module = model.unet.mid_block.attentions[0].transformer_blocks[0].attn1
+    setattr(module, 't', t)
