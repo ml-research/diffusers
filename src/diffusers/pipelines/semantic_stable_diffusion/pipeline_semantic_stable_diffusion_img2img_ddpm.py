@@ -697,45 +697,11 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
 
             # compute the previous noisy sample x_t -> x_t-1
             if use_ddpm:
-              idx = t_to_idx[int(t)]
-              z = zs[idx] if not zs is None else None
-
-              # 1. get previous step value (=t-1)
-              prev_timestep = t - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps
-
-              # 2. compute alphas, betas
-              alpha_prod_t = self.scheduler.alphas_cumprod[t]
-              alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.scheduler.final_alpha_cumprod
-              beta_prod_t = 1 - alpha_prod_t
-
-              # 3. compute predicted original sample from predicted noise also called
-              # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-              pred_original_sample = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
-
-              # 5. compute variance: "sigma_t(η)" -> see formula (16)
-              # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
-              variance = self.scheduler._get_variance(t, prev_timestep)
-              std_dev_t = eta * variance ** (0.5)
-
-              # Take care of asymetric reverse process (asyrp)
-              noise_pred_direction = noise_pred
-
-              # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-              # pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * model_output_direction
-              pred_sample_direction = (1 - alpha_prod_t_prev - eta * variance) ** (0.5) * noise_pred_direction
-
-              # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-              prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
-
-              # 8. Add noice if eta > 0
-              if eta > 0:
-                  if z is None:
-                      z = randn_tensor(noise_pred.shape, dtype=latents.dtype, device=self.device, generator=generator)
-                  sigma_z =  eta * variance ** (0.5) * z
-                  latents = prev_sample + sigma_z
+                idx = t_to_idx[int(t)]
+                latents = self.scheduler.step(noise_pred, t, latents, variance_noise=zs[idx], **extra_step_kwargs).prev_sample
 
             else: #if not use_ddpm:
-              latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
@@ -826,18 +792,13 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
             etas = [self.eta] * self.scheduler.num_inference_steps
 
         # intermediate latents
-        alpha_bar = self.scheduler.alphas_cumprod
-        sqrt_one_minus_alpha_bar = (1-alpha_bar) ** 0.5
-        alphas = self.scheduler.alphas
-        betas = 1 - alphas
-
         t_to_idx = {int(v):k for k,v in enumerate(timesteps)}
         xts = torch.zeros(size=variance_noise_shape, device=self.device)
 
         for t in reversed(timesteps):
             idx = t_to_idx[int(t)]
-            xts[idx] = x0 * (alpha_bar[t] ** 0.5) + sqrt_one_minus_alpha_bar[t] * randn_tensor(
-                shape=x0.shape, generator=generator, device=self.device, dtype=x0.dtype)
+            noise = randn_tensor(shape=x0.shape, generator=generator, device=self.device, dtype=x0.dtype)
+            xts[idx] = self.scheduler.add_noise(x0, noise, t)
         xts = torch.cat([xts, x0 ],dim = 0)
 
         # noise maps
