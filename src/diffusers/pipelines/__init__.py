@@ -65,7 +65,10 @@ else:
     )
     from .latent_diffusion import LDMTextToImagePipeline
     from .paint_by_example import PaintByExamplePipeline
-    from .semantic_stable_diffusion import SemanticStableDiffusionPipeline, SemanticStableDiffusionImg2ImgPipeline
+    from .semantic_stable_diffusion import (
+        SemanticStableDiffusionPipeline,
+        SemanticStableDiffusionImg2ImgPipeline,
+        SemanticStableDiffusionImg2ImgPipeline_DDPMInversion)
     from .stable_diffusion import (
         CycleDiffusionPipeline,
         StableDiffusionAttendAndExcitePipeline,
