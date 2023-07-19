@@ -9,7 +9,7 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 from ...image_processor import VaeImageProcessor
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from ...schedulers import KarrasDiffusionSchedulers
+from ...schedulers import DDIMScheduler
 from ...utils import logging, randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from . import SemanticStableDiffusionPipelineOutput
@@ -84,12 +84,17 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        scheduler: KarrasDiffusionSchedulers,
+        scheduler: DDIMScheduler,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
         requires_safety_checker: bool = True,
     ):
         super().__init__()
+
+        if not isinstance(scheduler, DDIMScheduler):
+            scheduler = DDIMScheduler.from_config(scheduler.config)
+            logger.warning("This pipeline only supports DDIMScheduler. "
+                "The scheduler has been changed to DDIMScheduler.")
 
         if safety_checker is None and requires_safety_checker:
             logger.warning(
