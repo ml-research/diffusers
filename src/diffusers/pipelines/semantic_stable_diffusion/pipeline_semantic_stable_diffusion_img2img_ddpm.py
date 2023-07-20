@@ -22,7 +22,7 @@ from tqdm import tqdm
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def load_512(image_path, left=0, right=0, top=0, bottom=0, device=None):
+def load_512(image_path, size, left=0, right=0, top=0, bottom=0, device=None):
     if type(image_path) is str:
         image = np.array(Image.open(image_path).convert('RGB'))[:, :, :3]
     else:
@@ -40,7 +40,7 @@ def load_512(image_path, left=0, right=0, top=0, bottom=0, device=None):
     elif w < h:
         offset = (h - w) // 2
         image = image[offset:offset + w]
-    image = np.array(Image.fromarray(image).resize((512, 512)))
+    image = np.array(Image.fromarray(image).resize((size, size)))
     image = torch.from_numpy(image).float() / 127.5 - 1
     image = image.permute(2, 0, 1).unsqueeze(0).to(device)
 
@@ -898,7 +898,7 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
 
     @torch.no_grad()
     def encode_image(self, image_path):
-        image = load_512(image_path, device=self.device)
+        image = load_512(image_path, size=self.unet.sample_size * self.vae_scale_factor, device=self.device)
         x0 = self.vae.encode(image).latent_dist.mode()
         x0 = self.vae.config.scaling_factor * x0
         return x0
