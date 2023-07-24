@@ -22,7 +22,7 @@ from tqdm import tqdm
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def load_512(image_path, size, left=0, right=0, top=0, bottom=0, device=None):
+def load_512(image_path, size, left=0, right=0, top=0, bottom=0, device=None, dtype=None):
     if type(image_path) is str:
         image = np.array(Image.open(image_path).convert('RGB'))[:, :, :3]
     else:
@@ -42,8 +42,9 @@ def load_512(image_path, size, left=0, right=0, top=0, bottom=0, device=None):
         image = image[offset:offset + w]
     image = np.array(Image.fromarray(image).resize((size, size)))
     image = torch.from_numpy(image).float() / 127.5 - 1
-    image = image.permute(2, 0, 1).unsqueeze(0).to(device)
+    image = image.permute(2, 0, 1).unsqueeze(0)
 
+    image = image.to(device=device, dtype=dtype)
     return image
 
 class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
@@ -837,18 +838,19 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         self.scheduler.set_timesteps(self.num_inversion_steps)
         timesteps = self.scheduler.timesteps.to(self.device)
 
-        # 1. encode image
-        x0 = self.encode_image(image_path)
+        # 1. get embeddings
+        if not source_prompt == "":
+            text_embeddings = self.encode_text(source_prompt)
+        uncond_embedding = self.encode_text("")
+
+        # 2. encode image
+        x0 = self.encode_image(image_path, dtype=uncond_embedding.dtype)
 
         # autoencoder reconstruction
         image_rec = self.vae.decode(x0 / self.vae.config.scaling_factor, return_dict=False)[0]
         image_rec = self.image_processor.postprocess(image_rec, output_type="pil")
 
-        # 2. find zs and xts
-        if not source_prompt == "":
-            text_embeddings = self.encode_text(source_prompt)
-        uncond_embedding = self.encode_text("")
-
+        # 3. find zs and xts
         variance_noise_shape = (
             self.num_inversion_steps,
             self.unet.config.in_channels,
@@ -857,7 +859,7 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
 
         # intermediate latents
         t_to_idx = {int(v):k for k,v in enumerate(timesteps)}
-        xts = torch.zeros(size=variance_noise_shape, device=self.device)
+        xts = torch.zeros(size=variance_noise_shape, device=self.device, dtype=uncond_embedding.dtype)
 
         for t in reversed(timesteps):
             idx = t_to_idx[int(t)]
@@ -866,7 +868,7 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         xts = torch.cat([xts, x0 ],dim = 0)
 
         # noise maps
-        zs = torch.zeros(size=variance_noise_shape, device=self.device)
+        zs = torch.zeros(size=variance_noise_shape, device=self.device, dtype=uncond_embedding.dtype)
 
         for t in tqdm(reversed(timesteps)):
             idx = t_to_idx[int(t)]
@@ -897,8 +899,11 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         return zs, xts, image_rec
 
     @torch.no_grad()
-    def encode_image(self, image_path):
-        image = load_512(image_path, size=self.unet.sample_size * self.vae_scale_factor, device=self.device)
+    def encode_image(self, image_path, dtype=None):
+        image = load_512(image_path,
+                        size=self.unet.sample_size * self.vae_scale_factor,
+                        device=self.device,
+                        dtype=dtype)
         x0 = self.vae.encode(image).latent_dist.mode()
         x0 = self.vae.config.scaling_factor * x0
         return x0
