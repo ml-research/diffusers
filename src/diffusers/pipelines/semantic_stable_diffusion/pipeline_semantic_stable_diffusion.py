@@ -446,17 +446,23 @@ class SemanticStableDiffusionPipeline(DiffusionPipeline):
             prompt,
             padding="max_length",
             max_length=self.tokenizer.model_max_length,
+            truncation=True,
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids
+        untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
 
-        if text_input_ids.shape[-1] > self.tokenizer.model_max_length:
-            removed_text = self.tokenizer.batch_decode(text_input_ids[:, self.tokenizer.model_max_length :])
+        if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
+            text_input_ids, untruncated_ids
+        ):
+            removed_text = self.tokenizer.batch_decode(
+                untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
+            )
             logger.warning(
                 "The following part of your input was truncated because CLIP can only handle sequences up to"
                 f" {self.tokenizer.model_max_length} tokens: {removed_text}"
             )
-            text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
+
         text_embeddings = self.text_encoder(text_input_ids.to(self.device))[0]
 
         # duplicate text embeddings for each generation per prompt, using mps friendly method
@@ -471,20 +477,27 @@ class SemanticStableDiffusionPipeline(DiffusionPipeline):
                     [x for item in editing_prompt for x in repeat(item, batch_size)],
                     padding="max_length",
                     max_length=self.tokenizer.model_max_length,
+                    truncation=True,
                     return_tensors="pt",
                 )
 
                 edit_concepts_input_ids = edit_concepts_input.input_ids
+                untruncated_ids = self.tokenizer(
+                    [x for item in editing_prompt for x in repeat(item, batch_size)],
+                    padding="longest",
+                    return_tensors="pt").input_ids
 
-                if edit_concepts_input_ids.shape[-1] > self.tokenizer.model_max_length:
+                if untruncated_ids.shape[-1] >= edit_concepts_input_ids.shape[-1] and not torch.equal(
+                    edit_concepts_input_ids, untruncated_ids
+                ):
                     removed_text = self.tokenizer.batch_decode(
-                        edit_concepts_input_ids[:, self.tokenizer.model_max_length :]
+                        untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
                     )
                     logger.warning(
                         "The following part of your input was truncated because CLIP can only handle sequences up to"
                         f" {self.tokenizer.model_max_length} tokens: {removed_text}"
                     )
-                    edit_concepts_input_ids = edit_concepts_input_ids[:, : self.tokenizer.model_max_length]
+
                 edit_concepts = self.text_encoder(edit_concepts_input_ids.to(self.device))[0]
             else:
                 edit_concepts = editing_prompt_embeddings.to(self.device).repeat(batch_size, 1, 1)
