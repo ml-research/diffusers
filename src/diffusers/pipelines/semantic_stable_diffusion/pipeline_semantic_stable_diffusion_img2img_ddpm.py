@@ -606,20 +606,20 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
                 noise_guidance = guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 if self.uncond_estimates is None:
-                    self.uncond_estimates = torch.zeros((num_inference_steps + 1, *noise_pred_uncond.shape))
+                    self.uncond_estimates = torch.zeros((len(timesteps), *noise_pred_uncond.shape))
                 self.uncond_estimates[i] = noise_pred_uncond.detach().cpu()
 
                 if self.text_estimates is None:
-                    self.text_estimates = torch.zeros((num_inference_steps + 1, *noise_pred_text.shape))
+                    self.text_estimates = torch.zeros((len(timesteps), *noise_pred_text.shape))
                 self.text_estimates[i] = noise_pred_text.detach().cpu()
 
                 if self.edit_estimates is None and enable_edit_guidance:
                     self.edit_estimates = torch.zeros(
-                        (num_inference_steps + 1, len(noise_pred_edit_concepts), *noise_pred_edit_concepts[0].shape)
+                        (len(timesteps), len(noise_pred_edit_concepts), *noise_pred_edit_concepts[0].shape)
                     )
 
                 if self.sem_guidance is None:
-                    self.sem_guidance = torch.zeros((num_inference_steps + 1, *noise_pred_text.shape))
+                    self.sem_guidance = torch.zeros((len(timesteps), *noise_pred_text.shape))
 
                 if edit_momentum is None:
                     edit_momentum = torch.zeros_like(noise_guidance)
@@ -684,30 +684,33 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
 
                         noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
 
+                        # calculate quantile
+                        noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
+                        noise_guidance_edit_tmp_quantile = torch.sum(noise_guidance_edit_tmp_quantile, dim=1, keepdim=True)
+                        noise_guidance_edit_tmp_quantile = noise_guidance_edit_tmp_quantile.repeat(1,4,1,1)
+
                         # torch.quantile function expects float32
-                        if noise_guidance_edit_tmp.dtype == torch.float32:
+                        if noise_guidance_edit_tmp_quantile.dtype == torch.float32:
                             tmp = torch.quantile(
-                                torch.abs(noise_guidance_edit_tmp).flatten(start_dim=2),
+                                noise_guidance_edit_tmp_quantile.flatten(start_dim=2),
                                 edit_threshold_c,
                                 dim=2,
                                 keepdim=False,
                             )
                         else:
                             tmp = torch.quantile(
-                                torch.abs(noise_guidance_edit_tmp).flatten(start_dim=2).to(torch.float32),
+                                noise_guidance_edit_tmp_quantile.flatten(start_dim=2).to(torch.float32),
                                 edit_threshold_c,
                                 dim=2,
                                 keepdim=False,
-                            ).to(noise_guidance_edit_tmp.dtype)
+                            ).to(noise_guidance_edit_tmp_quantile.dtype)
 
                         noise_guidance_edit_tmp = torch.where(
-                            torch.abs(noise_guidance_edit_tmp) >= tmp[:, :, None, None],
+                            noise_guidance_edit_tmp_quantile >= tmp[:, :, None, None],
                             noise_guidance_edit_tmp,
                             torch.zeros_like(noise_guidance_edit_tmp),
                         )
                         noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
-
-                        # noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
 
                     warmup_inds = torch.tensor(warmup_inds).to(self.device)
                     if len(noise_pred_edit_concepts) > warmup_inds.shape[0] > 0:
