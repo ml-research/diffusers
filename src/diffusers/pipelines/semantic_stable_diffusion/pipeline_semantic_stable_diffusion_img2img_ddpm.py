@@ -254,6 +254,7 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         edit_warmup_steps: Optional[Union[int, List[int]]] = 10,
         edit_cooldown_steps: Optional[Union[int, List[int]]] = None,
         edit_threshold: Optional[Union[float, List[float]]] = 0.9,
+        user_mask: Optional[torch.FloatTensor] = None,
         edit_momentum_scale: Optional[float] = 0.1,
         edit_mom_beta: Optional[float] = 0.4,
         edit_weights: Optional[List[float]] = None,
@@ -553,6 +554,10 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
             latents,
         )
 
+        if user_mask is not None:
+            user_mask = user_mask.to(self.device)
+            assert(latents.shape[-2:] == user_mask.shape)
+
         # 6. Prepare extra step kwargs.
         extra_step_kwargs = self.prepare_extra_step_kwargs(eta)
 
@@ -683,6 +688,9 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
                         concept_weights[c, :] = tmp_weights
 
                         noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
+
+                        if user_mask is not None:
+                            noise_guidance_edit_tmp = noise_guidance_edit_tmp * user_mask
 
                         # calculate quantile
                         noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
