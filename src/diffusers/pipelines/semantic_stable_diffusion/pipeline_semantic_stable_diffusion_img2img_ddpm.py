@@ -447,6 +447,7 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         sem_guidance: Optional[List[torch.Tensor]] = None,
         # Cross-attention masking
         use_cross_attn_mask: bool = False,
+        edit_tokens_for_attn_map: List[str] = None,
         # Attention store (just for visualization purposes)
         attn_store_steps: Optional[List[int]] = [],
         store_averaged_over_steps: bool = True,
@@ -619,6 +620,9 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         if enable_edit_guidance:
             # get safety text embeddings
             if editing_prompt_embeddings is None:
+                edit_tokens = [[word.replace("</w>", "") for word in self.tokenizer.tokenize(item)] for item in editing_prompt]
+                print(f"edit_tokens: {edit_tokens}")
+
                 edit_concepts_input = self.tokenizer(
                     [x for item in editing_prompt for x in repeat(item, batch_size)],
                     padding="max_length",
@@ -904,10 +908,19 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
                                 select=self.text_cross_attention_maps.index(editing_prompt[c]),
                             )
 
-                            attn_map = out[:, :, 1:1+num_edit_tokens[c]] # 0 -> startoftext
+                            attn_map = out[:, :, 1:] # 0 -> startoftext
+                            attn_map *= 100
+                            attn_map = torch.nn.functional.softmax(attn_map, dim=-1)
+                            attn_map = attn_map[:,:,:num_edit_tokens[c]] # -1 -> endoftext
 
-                            # average over all tokens
                             assert(attn_map.shape[2]==num_edit_tokens[c])
+                            if edit_tokens_for_attn_map is not None:
+                                # select attn_map for specified tokens
+                                token_idx = [edit_tokens[c].index(item) for item in edit_tokens_for_attn_map[c]]
+                                attn_map = attn_map[:,:,token_idx]
+                                assert(attn_map.shape[2] == len(edit_tokens_for_attn_map[c]))
+
+                            # average over tokens
                             attn_map = torch.sum(attn_map, dim=2)
 
                             # gaussian_smoothing
