@@ -164,6 +164,8 @@ else:
         SemanticStableDiffusionPipeline,
         SemanticStableDiffusionImg2ImgPipeline,
         SemanticStableDiffusionImg2ImgPipeline_DDPMInversion,
+        SemanticStableDiffusionXLPipeline,
+        SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion,
         ShapEImg2ImgPipeline,
         ShapEPipeline,
         StableDiffusionAdapterPipeline,

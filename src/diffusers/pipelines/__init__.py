@@ -86,7 +86,9 @@ else:
     from .semantic_stable_diffusion import (
         SemanticStableDiffusionPipeline,
         SemanticStableDiffusionImg2ImgPipeline,
-        SemanticStableDiffusionImg2ImgPipeline_DDPMInversion)
+        SemanticStableDiffusionImg2ImgPipeline_DDPMInversion,
+        SemanticStableDiffusionXLPipeline,
+        SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion)
     from .shap_e import ShapEImg2ImgPipeline, ShapEPipeline
     from .stable_diffusion import (
         CycleDiffusionPipeline,

@@ -6,7 +6,7 @@ import numpy as np
 import PIL
 from PIL import Image
 
-from ...utils import BaseOutput, OptionalDependencyNotAvailable, is_torch_available, is_transformers_available
+from ...utils import BaseOutput, is_torch_available, is_transformers_available
 
 
 @dataclass
@@ -26,6 +26,18 @@ class SemanticStableDiffusionPipelineOutput(BaseOutput):
     images: Union[List[PIL.Image.Image], np.ndarray]
     nsfw_content_detected: Optional[List[bool]]
 
+@dataclass
+class StableDiffusionXLPipelineOutput(BaseOutput):
+    """
+    Output class for Stable Diffusion pipelines.
+
+    Args:
+        images (`List[PIL.Image.Image]` or `np.ndarray`)
+            List of denoised PIL images of length `batch_size` or numpy array of shape `(batch_size, height, width,
+            num_channels)`. PIL images or numpy array present the denoised images of the diffusion pipeline.
+    """
+
+    images: Union[List[PIL.Image.Image], np.ndarray]
 
 try:
     if not (is_transformers_available() and is_torch_available()):
@@ -36,3 +48,5 @@ else:
     from .pipeline_semantic_stable_diffusion import SemanticStableDiffusionPipeline
     from .pipeline_semantic_stable_diffusion_img2img import SemanticStableDiffusionImg2ImgPipeline
     from .pipeline_semantic_stable_diffusion_img2img_ddpm import SemanticStableDiffusionImg2ImgPipeline_DDPMInversion
+    from .pipeline_semantic_stable_diffusion_xl import SemanticStableDiffusionXLPipeline
+    from .pipeline_semantic_stable_diffusion_xl_img2img_ddpm import SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion
