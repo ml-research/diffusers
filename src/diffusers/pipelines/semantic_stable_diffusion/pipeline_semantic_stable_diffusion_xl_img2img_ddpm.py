@@ -32,7 +32,7 @@ from ...models.attention_processor import (
     LoRAXFormersAttnProcessor,
     XFormersAttnProcessor,
 )
-from ...schedulers import KarrasDiffusionSchedulers
+from ...schedulers import DDIMScheduler
 from ...utils import (
     is_accelerate_available,
     is_accelerate_version,
@@ -155,11 +155,16 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
         tokenizer: CLIPTokenizer,
         tokenizer_2: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        scheduler: KarrasDiffusionSchedulers,
+        scheduler: DDIMScheduler,
         force_zeros_for_empty_prompt: bool = True,
         add_watermarker: Optional[bool] = None,
     ):
         super().__init__()
+
+        if not isinstance(scheduler, DDIMScheduler):
+            scheduler = DDIMScheduler.from_config(scheduler.config)
+            logger.warning("This pipeline only supports DDIMScheduler. "
+                "The scheduler has been changed to DDIMScheduler.")
 
         self.register_modules(
             vae=vae,
@@ -465,10 +470,10 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
             negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
         if enable_edit_guidance:
-            seq_len = edit_concepts_embeds.shape[1]
+            bs_embed_edit, seq_len, _ = edit_concepts_embeds.shape
             edit_concepts_embeds = edit_concepts_embeds.to(dtype=self.text_encoder_2.dtype, device=device)
             edit_concepts_embeds = edit_concepts_embeds.repeat(1, num_images_per_prompt, 1)
-            edit_concepts_embeds = edit_concepts_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            edit_concepts_embeds = edit_concepts_embeds.view(bs_embed_edit * num_images_per_prompt, seq_len, -1)
 
         pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
             bs_embed * num_images_per_prompt, -1
@@ -480,7 +485,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
 
         if enable_edit_guidance:
             edit_pooled_prompt_embeds = edit_pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
-                bs_embed * num_images_per_prompt, -1
+                bs_embed_edit * num_images_per_prompt, -1
             )
 
         return (prompt_embeds, negative_prompt_embeds, edit_concepts_embeds,
@@ -927,7 +932,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
         if enable_edit_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, edit_prompt_embeds], dim=0)
             add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds, pooled_edit_embeds], dim=0)
-            edit_concepts_time_ids = add_time_ids.repeat(edit_prompt_embeds.shape[0], add_time_ids.shape[0])
+            edit_concepts_time_ids = add_time_ids.repeat(edit_prompt_embeds.shape[0], 1)
             add_time_ids = torch.cat([add_time_ids, add_time_ids, edit_concepts_time_ids], dim=0)
         elif do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)

@@ -436,10 +436,10 @@ class SemanticStableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, 
             negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
         if enable_edit_guidance:
-            seq_len = edit_concepts_embeds.shape[1]
+            bs_embed_edit, seq_len, _ = edit_concepts_embeds.shape
             edit_concepts_embeds = edit_concepts_embeds.to(dtype=self.text_encoder_2.dtype, device=device)
             edit_concepts_embeds = edit_concepts_embeds.repeat(1, num_images_per_prompt, 1)
-            edit_concepts_embeds = edit_concepts_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            edit_concepts_embeds = edit_concepts_embeds.view(bs_embed_edit * num_images_per_prompt, seq_len, -1)
 
         pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
             bs_embed * num_images_per_prompt, -1
@@ -451,7 +451,7 @@ class SemanticStableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, 
 
         if enable_edit_guidance:
             edit_pooled_prompt_embeds = edit_pooled_prompt_embeds.repeat(1, num_images_per_prompt).view(
-                bs_embed * num_images_per_prompt, -1
+                bs_embed_edit * num_images_per_prompt, -1
             )
 
         return (prompt_embeds, negative_prompt_embeds, edit_concepts_embeds,
@@ -890,7 +890,8 @@ class SemanticStableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, 
         if enable_edit_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, edit_prompt_embeds], dim=0)
             add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds, pooled_edit_embeds], dim=0)
-            add_time_ids = torch.cat([add_time_ids, add_time_ids, add_time_ids], dim=0)
+            edit_concepts_time_ids = add_time_ids.repeat(edit_prompt_embeds.shape[0], 1)
+            add_time_ids = torch.cat([add_time_ids, add_time_ids, edit_concepts_time_ids], dim=0)
         elif do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
@@ -1122,6 +1123,8 @@ class SemanticStableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, 
         # make sure the VAE is in float32 mode, as it overflows in float16
         if self.vae.dtype == torch.float16 and self.vae.config.force_upcast:
             self.upcast_vae()
+            latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
+        elif self.vae.config.force_upcast:
             latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
 
         if not output_type == "latent":
