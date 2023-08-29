@@ -620,8 +620,9 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         if enable_edit_guidance:
             # get safety text embeddings
             if editing_prompt_embeddings is None:
-                edit_tokens = [[word.replace("</w>", "") for word in self.tokenizer.tokenize(item)] for item in editing_prompt]
-                print(f"edit_tokens: {edit_tokens}")
+                if edit_tokens_for_attn_map is not None:
+                    edit_tokens = [[word.replace("</w>", "") for word in self.tokenizer.tokenize(item)] for item in editing_prompt]
+                    print(f"edit_tokens: {edit_tokens}")
 
                 edit_concepts_input = self.tokenizer(
                     [x for item in editing_prompt for x in repeat(item, batch_size)],

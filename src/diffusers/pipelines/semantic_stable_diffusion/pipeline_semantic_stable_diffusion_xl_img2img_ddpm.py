@@ -1254,7 +1254,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
 
     @torch.no_grad()
     def invert(self,
-                image: Image,
+                image_path: str,
                 source_prompt: str = "",
                 source_prompt_2: str = None,
                 source_guidance_scale = 3.5,
@@ -1352,6 +1352,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
         add_time_ids = add_time_ids.to(device).repeat(batch_size * num_images_per_prompt, 1)
 
         # 4. prepare image
+        image = Image.open(image_path)
         size = self.unet.sample_size * self.vae_scale_factor
         image = image.convert("RGB").resize((size,size))
         image = self.image_processor.preprocess(image)
