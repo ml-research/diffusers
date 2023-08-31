@@ -15,6 +15,7 @@
 import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from itertools import repeat
 
 import torch
 from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
@@ -387,8 +388,8 @@ class SemanticStableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, 
             negative_prompt_embeds = torch.concat(negative_prompt_embeds_list, dim=-1)
 
         if enable_edit_guidance:
+            editing_prompt=[x for item in editing_prompt for x in repeat(item, batch_size)]
             editing_prompt_2 = editing_prompt
-
             editing_prompts = [editing_prompt, editing_prompt_2]
             edit_prompt_embeds_list = []
 
@@ -890,7 +891,7 @@ class SemanticStableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, 
         if enable_edit_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, edit_prompt_embeds], dim=0)
             add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds, pooled_edit_embeds], dim=0)
-            edit_concepts_time_ids = add_time_ids.repeat(edit_prompt_embeds.shape[0], 1)
+            edit_concepts_time_ids = add_time_ids.repeat(enabled_editing_prompts, 1)
             add_time_ids = torch.cat([add_time_ids, add_time_ids, edit_concepts_time_ids], dim=0)
         elif do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
