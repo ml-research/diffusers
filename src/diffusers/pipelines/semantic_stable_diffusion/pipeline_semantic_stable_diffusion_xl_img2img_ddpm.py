@@ -19,6 +19,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
+import torch.nn.functional as F
+import math
 
 import torch
 from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
@@ -31,6 +33,8 @@ from ...models.attention_processor import (
     LoRAAttnProcessor2_0,
     LoRAXFormersAttnProcessor,
     XFormersAttnProcessor,
+    AttnProcessor,
+    Attention
 )
 from ...schedulers import DDIMScheduler
 from ...utils import (
@@ -66,6 +70,167 @@ EXAMPLE_DOC_STRING = """
         >>> image = pipe(prompt).images[0]
         ```
 """
+
+
+class AttentionStore():
+    @staticmethod
+    def get_empty_store():
+        return {"down_cross": [], "mid_cross": [], "up_cross": [],
+                "down_self": [],  "mid_self": [],  "up_self": []}
+
+    def __call__(self, attn, is_cross: bool, place_in_unet: str, editing_prompts):
+        # attn.shape = batch_size * head_size, seq_len query, seq_len_key
+        bs = 2 + editing_prompts
+        source_batch_size = int(attn.shape[0] // bs)
+        skip = 1 # skip unconditional
+        self.forward(
+                attn[skip*source_batch_size:],
+                is_cross,
+                place_in_unet)
+
+    def forward(self, attn, is_cross: bool, place_in_unet: str):
+        key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
+        #print(f"{key} : {attn.shape[1]}")
+        self.step_store[key].append(attn)
+
+    def between_steps(self, store_step=True):
+        if store_step:
+            if self.average:
+                if len(self.attention_store) == 0:
+                    self.attention_store = self.step_store
+                else:
+                    for key in self.attention_store:
+                        for i in range(len(self.attention_store[key])):
+                            self.attention_store[key][i] += self.step_store[key][i]
+            else:
+                if len(self.attention_store) == 0:
+                    self.attention_store = [self.step_store]
+                else:
+                    self.attention_store.append(self.step_store)
+
+            self.cur_step += 1
+        self.step_store = self.get_empty_store()
+
+    def get_attention(self, step: int):
+        if self.average:
+            attention = {key: [item / self.cur_step for item in self.attention_store[key]] for key in self.attention_store}
+        else:
+            assert(step is not None)
+            attention = self.attention_store[step]
+        return attention
+
+    def aggregate_attention(self, attention_maps, prompts, res: int,
+        from_where: List[str], is_cross: bool, select: int
+    ):
+        out = []
+        num_pixels = res ** 2
+        for location in from_where:
+            for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
+                if item.shape[1] == num_pixels:
+                    cross_maps = item.reshape(len(prompts), -1, res, res, item.shape[-1])[select]
+                    out.append(cross_maps)
+        out = torch.cat(out, dim=0)
+        # average over heads
+        out = out.sum(0) / out.shape[0]
+        return out
+
+    def __init__(self, average: bool):
+        self.step_store = self.get_empty_store()
+        self.attention_store = []
+        self.cur_step = 0
+        self.average = average
+
+class CrossAttnProcessor:
+
+    def __init__(self, attention_store, place_in_unet, editing_prompts):
+        self.attnstore = attention_store
+        self.place_in_unet = place_in_unet
+        self.editing_prompts = editing_prompts
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        temb=None,
+    ):
+        assert(not attn.residual_connection)
+        assert(attn.spatial_norm is None)
+        assert(attn.group_norm is None)
+        assert(hidden_states.ndim != 4)
+        assert(encoder_hidden_states is not None) # is cross
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        attention_probs = attn.get_attention_scores(query, key, attention_mask)
+        self.attnstore(attention_probs,
+                        is_cross=True,
+                        place_in_unet=self.place_in_unet,
+                        editing_prompts=self.editing_prompts)
+
+        hidden_states = torch.bmm(attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+        return hidden_states
+
+
+# Modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionAttendAndExcitePipeline.GaussianSmoothing
+class GaussianSmoothing():
+
+    def __init__(self, device):
+        kernel_size = [3, 3]
+        sigma = [0.5, 0.5]
+
+        # The gaussian kernel is the product of the gaussian function of each dimension.
+        kernel = 1
+        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size])
+        for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
+            mean = (size - 1) / 2
+            kernel *= 1 / (std * math.sqrt(2 * math.pi)) * torch.exp(-(((mgrid - mean) / (2 * std)) ** 2))
+
+        # Make sure sum of values in gaussian kernel equals 1.
+        kernel = kernel / torch.sum(kernel)
+
+        # Reshape to depthwise convolutional weight
+        kernel = kernel.view(1, 1, *kernel.size())
+        kernel = kernel.repeat(1, *[1] * (kernel.dim() - 1))
+
+        self.weight = kernel.to(device)
+
+    def __call__(self, input):
+        """
+        Arguments:
+        Apply gaussian filter to input.
+            input (torch.Tensor): Input to apply gaussian filter on.
+        Returns:
+            filtered (torch.Tensor): Filtered output.
+        """
+        return F.conv2d(input, weight=self.weight.to(input.dtype))
+
 
 def load_image(image_path, size, left=0, right=0, top=0, bottom=0, device=None, dtype=None):
     print(f"load image of size {size}x{size}")
@@ -420,6 +585,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
 
             negative_prompt_embeds = torch.concat(negative_prompt_embeds_list, dim=-1)
 
+        num_edit_tokens = None
         if enable_edit_guidance:
             editing_prompt_2 = editing_prompt
 
@@ -438,8 +604,10 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
                     max_length=max_length,
                     truncation=True,
                     return_tensors="pt",
+                    return_length=True
                 )
 
+                num_edit_tokens = edit_concepts_input.length -2 # not counting startoftext and endoftext
                 edit_concepts_input_ids = edit_concepts_input.input_ids
                 edit_concepts_embeds = text_encoder(
                     edit_concepts_input.input_ids.to(device),
@@ -489,7 +657,8 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
             )
 
         return (prompt_embeds, negative_prompt_embeds, edit_concepts_embeds,
-            pooled_prompt_embeds, negative_pooled_prompt_embeds, edit_pooled_prompt_embeds)
+            pooled_prompt_embeds, negative_pooled_prompt_embeds, edit_pooled_prompt_embeds,
+            num_edit_tokens)
 
     # Modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
     def prepare_extra_step_kwargs(self, eta):
@@ -591,6 +760,29 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
         latents = latents * self.scheduler.init_noise_sigma
         return latents
 
+    def prepare_unet(self, attention_store, enabled_editing_prompts):
+        attn_procs = {}
+        for name in self.unet.attn_processors.keys():
+            if name.startswith("mid_block"):
+                place_in_unet = "mid"
+            elif name.startswith("up_blocks"):
+                place_in_unet = "up"
+            elif name.startswith("down_blocks"):
+                place_in_unet = "down"
+            else:
+                continue
+
+            if "attn2" in name:
+                attn_procs[name] = CrossAttnProcessor(
+                    attention_store=attention_store,
+                    place_in_unet=place_in_unet,
+                    editing_prompts=enabled_editing_prompts)
+            else:
+                attn_procs[name] = AttnProcessor()
+
+        self.unet.set_attn_processor(attn_procs)
+
+
     def _get_add_time_ids(self, original_size, crops_coords_top_left, target_size, dtype):
         add_time_ids = list(original_size + crops_coords_top_left + target_size)
 
@@ -668,6 +860,11 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
         edit_mom_beta: Optional[float] = 0.4,
         edit_weights: Optional[List[float]] = None,
         sem_guidance: Optional[List[torch.Tensor]] = None,
+        user_mask: Optional[torch.FloatTensor] = None,
+        use_cross_attn_mask: bool = False,
+        # Attention store (just for visualization purposes)
+        attn_store_steps: Optional[List[int]] = [],
+        store_averaged_over_steps: bool = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -817,6 +1014,9 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
         zs = self.zs
         wts = self.wts
 
+        if use_cross_attn_mask:
+            self.smoothing = GaussianSmoothing(self.device)
+
         # 0. Default height and width to unet
         height = self.height
         width = self.width
@@ -883,6 +1083,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
             pooled_prompt_embeds,
             negative_pooled_prompt_embeds,
             pooled_edit_embeds,
+            num_edit_tokens
         ) = self.encode_prompt(
             prompt=prompt,
             prompt_2=prompt_2,
@@ -908,6 +1109,9 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
             t_to_idx = {int(v):k for k,v in enumerate(timesteps[-zs.shape[0]:])}
             timesteps = timesteps[-zs.shape[0]:]
 
+        self.attention_store = AttentionStore(average=store_averaged_over_steps)
+        self.prepare_unet(self.attention_store, enabled_editing_prompts)
+
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
         latents = self.prepare_latents(
@@ -920,6 +1124,10 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
             latents,
         )
 
+        if user_mask is not None:
+            user_mask = user_mask.to(self.device)
+            assert(latents.shape[-2:] == user_mask.shape)
+
         # 6. Prepare extra step kwargs.
         extra_step_kwargs = self.prepare_extra_step_kwargs(eta)
 
@@ -929,11 +1137,15 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
             original_size, crops_coords_top_left, target_size, dtype=prompt_embeds.dtype
         )
 
+        self.text_cross_attention_maps = [prompt] if isinstance(prompt, str) else prompt
         if enable_edit_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, edit_prompt_embeds], dim=0)
             add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds, pooled_edit_embeds], dim=0)
             edit_concepts_time_ids = add_time_ids.repeat(edit_prompt_embeds.shape[0], 1)
             add_time_ids = torch.cat([add_time_ids, add_time_ids, edit_concepts_time_ids], dim=0)
+
+            self.text_cross_attention_maps += \
+                    ([editing_prompt] if isinstance(editing_prompt, str) else editing_prompt)
         elif do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
@@ -1057,32 +1269,79 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
 
                             noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
 
-                            # calculate quantile
-                            noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
-                            noise_guidance_edit_tmp_quantile = torch.sum(noise_guidance_edit_tmp_quantile, dim=1, keepdim=True)
-                            noise_guidance_edit_tmp_quantile = noise_guidance_edit_tmp_quantile.repeat(1,4,1,1)
+                            if user_mask is not None:
+                                noise_guidance_edit_tmp = noise_guidance_edit_tmp * user_mask
 
-                            # torch.quantile function expects float32
-                            if noise_guidance_edit_tmp_quantile.dtype == torch.float32:
-                                tmp = torch.quantile(
-                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2),
-                                    edit_threshold_c,
-                                    dim=2,
-                                    keepdim=False,
+                            if use_cross_attn_mask:
+                                out = self.attention_store.aggregate_attention(
+                                    attention_maps=self.attention_store.step_store,
+                                    prompts=self.text_cross_attention_maps,
+                                    res=32,
+                                    from_where=["up","down"],
+                                    is_cross=True,
+                                    select=self.text_cross_attention_maps.index(editing_prompt[c]),
                                 )
-                            else:
-                                tmp = torch.quantile(
-                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2).to(torch.float32),
-                                    edit_threshold_c,
-                                    dim=2,
-                                    keepdim=False,
-                                ).to(noise_guidance_edit_tmp_quantile.dtype)
 
-                            noise_guidance_edit_tmp = torch.where(
-                                noise_guidance_edit_tmp_quantile >= tmp[:, :, None, None],
-                                noise_guidance_edit_tmp,
-                                torch.zeros_like(noise_guidance_edit_tmp),
-                            )
+                                attn_map = out[:, :, 1:1+num_edit_tokens[c]] # 0 -> startoftext
+
+                                # average over all tokens
+                                assert(attn_map.shape[2]==num_edit_tokens[c])
+                                attn_map = torch.sum(attn_map, dim=2)
+
+                                # gaussian_smoothing
+                                attn_map = F.pad(attn_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect")
+                                attn_map = self.smoothing(attn_map).squeeze(0).squeeze(0)
+
+                                # create binary mask
+                                # torch.quantile function expects float32
+                                if attn_map.dtype == torch.float32:
+                                    tmp = torch.quantile(
+                                        attn_map.flatten(),
+                                        edit_threshold_c
+                                    )
+                                else:
+                                    tmp = torch.quantile(
+                                        attn_map.flatten().to(torch.float32),
+                                        edit_threshold_c
+                                    ).to(attn_map.dtype)
+
+                                attn_mask = torch.where(attn_map >= tmp, 1.0, 0.0)
+
+                                # resolution must match latent space dimension
+                                attn_mask = F.interpolate(
+                                    attn_mask.unsqueeze(0).unsqueeze(0),
+                                    noise_guidance_edit_tmp.shape[-2:]
+                                )[0,0,:,:]
+
+                                noise_guidance_edit_tmp = noise_guidance_edit_tmp * attn_mask
+                            else:
+                                # calculate quantile
+                                noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
+                                noise_guidance_edit_tmp_quantile = torch.sum(noise_guidance_edit_tmp_quantile, dim=1, keepdim=True)
+                                noise_guidance_edit_tmp_quantile = noise_guidance_edit_tmp_quantile.repeat(1,4,1,1)
+
+                                # torch.quantile function expects float32
+                                if noise_guidance_edit_tmp_quantile.dtype == torch.float32:
+                                    tmp = torch.quantile(
+                                        noise_guidance_edit_tmp_quantile.flatten(start_dim=2),
+                                        edit_threshold_c,
+                                        dim=2,
+                                        keepdim=False,
+                                    )
+                                else:
+                                    tmp = torch.quantile(
+                                        noise_guidance_edit_tmp_quantile.flatten(start_dim=2).to(torch.float32),
+                                        edit_threshold_c,
+                                        dim=2,
+                                        keepdim=False,
+                                    ).to(noise_guidance_edit_tmp_quantile.dtype)
+
+                                noise_guidance_edit_tmp = torch.where(
+                                    noise_guidance_edit_tmp_quantile >= tmp[:, :, None, None],
+                                    noise_guidance_edit_tmp,
+                                    torch.zeros_like(noise_guidance_edit_tmp),
+                                )
+
                             noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
 
                         warmup_inds = torch.tensor(warmup_inds).to(self.device)
@@ -1147,6 +1406,12 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
 
                 else: #if not use_ddpm:
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+                # step callback
+                store_step = i in attn_store_steps
+                if store_step:
+                    print(f"storing attention for step {i}")
+                self.attention_store.between_steps(store_step)
 
                 # call the callback, if provided
                 progress_bar.update()
@@ -1323,6 +1588,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
             _,
             pooled_prompt_embeds,
             negative_pooled_prompt_embeds,
+            _,
             _
         ) = self.encode_prompt(
             prompt=source_prompt,
