@@ -136,6 +136,7 @@ else:
         AudioLDMPipeline,
         CycleDiffusionPipeline,
         IFImg2ImgPipeline,
+        IFSemanticPipeline,
         IFImg2ImgSuperResolutionPipeline,
         IFInpaintingPipeline,
         IFInpaintingSuperResolutionPipeline,
