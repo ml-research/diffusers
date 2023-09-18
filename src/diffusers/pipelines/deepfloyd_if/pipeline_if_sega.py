@@ -802,6 +802,10 @@ class IFSemanticPipeline(DiffusionPipeline):
         # Initialize edit_momentum to None
         edit_momentum = None
 
+        self.uncond_estimates = None
+        self.text_estimates = None
+        self.sem_guidance = None
+
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -831,6 +835,18 @@ class IFSemanticPipeline(DiffusionPipeline):
 
                     # default text guidance
                     noise_guidance = (noise_pred_text - noise_pred_uncond) * guidance_scale
+
+                    if self.uncond_estimates is None:
+                        self.uncond_estimates = torch.zeros((len(timesteps), *noise_pred_uncond.shape))
+                    self.uncond_estimates[i] = noise_pred_uncond.detach().cpu()
+
+                    if self.text_estimates is None:
+                        self.text_estimates = torch.zeros((len(timesteps), *noise_pred_text.shape))
+                    self.text_estimates[i] = noise_pred_text.detach().cpu()
+
+                    if self.sem_guidance is None:
+                        self.sem_guidance = torch.zeros((len(timesteps), *noise_pred_text.shape))
+
                     if edit_momentum is None:
                         edit_momentum = torch.zeros_like(noise_guidance)
 
@@ -898,30 +914,33 @@ class IFSemanticPipeline(DiffusionPipeline):
 
                             noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
 
+                            # calculate quantile
+                            noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
+                            noise_guidance_edit_tmp_quantile = torch.sum(noise_guidance_edit_tmp_quantile, dim=1, keepdim=True)
+                            noise_guidance_edit_tmp_quantile = noise_guidance_edit_tmp_quantile.repeat(1,noise_guidance_edit_tmp.shape[1],1,1)
+
                             # torch.quantile function expects float32
-                            if noise_guidance_edit_tmp.dtype == torch.float32:
+                            if noise_guidance_edit_tmp_quantile.dtype == torch.float32:
                                 tmp = torch.quantile(
-                                    torch.abs(noise_guidance_edit_tmp).flatten(start_dim=2),
+                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2),
                                     edit_threshold_c,
                                     dim=2,
                                     keepdim=False,
                                 )
                             else:
                                 tmp = torch.quantile(
-                                    torch.abs(noise_guidance_edit_tmp).flatten(start_dim=2).to(torch.float32),
+                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2).to(torch.float32),
                                     edit_threshold_c,
                                     dim=2,
                                     keepdim=False,
-                                ).to(noise_guidance_edit_tmp.dtype)
+                                ).to(noise_guidance_edit_tmp_quantile.dtype)
 
                             noise_guidance_edit_tmp = torch.where(
-                                torch.abs(noise_guidance_edit_tmp) >= tmp[:, :, None, None],
+                                noise_guidance_edit_tmp_quantile >= tmp[:, :, None, None],
                                 noise_guidance_edit_tmp,
                                 torch.zeros_like(noise_guidance_edit_tmp),
                             )
                             noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
-
-                            # noise_guidance_edit = noise_guidance_edit + noise_guidance_edit_tmp
 
                         warmup_inds = torch.tensor(warmup_inds).to(self.device)
                         if len(noise_pred_edit_concepts) > warmup_inds.shape[0] > 0:
@@ -966,10 +985,14 @@ class IFSemanticPipeline(DiffusionPipeline):
                         if warmup_inds.shape[0] == len(noise_pred_edit_concepts):
                             #print(noise_guidance.device, noise_guidance_edit.device)
                             noise_guidance = noise_guidance + noise_guidance_edit
+                            self.sem_guidance[i] = noise_guidance_edit.detach().cpu()
 
 
                     noise_pred = noise_pred_uncond + noise_guidance
                     noise_pred = torch.cat([noise_pred, predicted_variance], dim=1)
+
+                if self.scheduler.config.variance_type not in ["learned", "learned_range"]:
+                    noise_pred, _ = noise_pred.split(model_input.shape[1], dim=1)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 intermediate_images = self.scheduler.step(
