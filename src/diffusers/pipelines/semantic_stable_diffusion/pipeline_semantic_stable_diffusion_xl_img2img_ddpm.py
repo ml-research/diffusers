@@ -1668,7 +1668,7 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
         # noise maps
         zs = torch.zeros(size=variance_noise_shape, device=self.device, dtype=negative_prompt_embeds.dtype)
 
-        for t in tqdm(reversed(timesteps)):
+        for t in tqdm(timesteps):
             idx = t_to_idx[int(t)]
             # 1. predict noise residual
             xt = xts[idx][None]

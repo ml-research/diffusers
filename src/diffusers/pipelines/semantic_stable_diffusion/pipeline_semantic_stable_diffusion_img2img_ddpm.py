@@ -1105,9 +1105,9 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         timesteps = self.scheduler.timesteps.to(self.device)
 
         # 1. get embeddings
-        if not source_prompt == "":
-            text_embeddings = self.encode_text(source_prompt)
+        text_embeddings = self.encode_text(source_prompt)
         uncond_embedding = self.encode_text("")
+        prompt_embeds = torch.cat([uncond_embedding, text_embeddings])
 
         # 2. encode image
         x0 = self.encode_image(image_path, dtype=uncond_embedding.dtype)
@@ -1136,16 +1136,21 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         # noise maps
         zs = torch.zeros(size=variance_noise_shape, device=self.device, dtype=uncond_embedding.dtype)
 
-        for t in tqdm(reversed(timesteps)):
+        for t in tqdm(timesteps):
             idx = t_to_idx[int(t)]
             # 1. predict noise residual
             xt = xts[idx][None]
+            model_input = torch.cat([xt] * 2)
+            noise_pred = self.unet(
+                model_input,
+                timestep=t,
+                encoder_hidden_states=prompt_embeds,
+                cross_attention_kwargs=None,
+                return_dict=False
+            )[0]
 
-            noise_pred = self.unet(xt, timestep=t, encoder_hidden_states=uncond_embedding).sample
-
-            if not source_prompt == "":
-                noise_pred_cond = self.unet(xt, timestep=t, encoder_hidden_states=text_embeddings).sample
-                noise_pred = noise_pred + source_guidance_scale * (noise_pred_cond - noise_pred)
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + (noise_pred_text - noise_pred_uncond) * source_guidance_scale
 
             xtm1 =  xts[idx+1][None]
             z, xtm1_corrected = compute_noise(self.scheduler, xtm1, xt, t, noise_pred, eta)
