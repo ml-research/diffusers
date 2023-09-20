@@ -55,6 +55,7 @@ else:
     from .deepfloyd_if import (
         IFImg2ImgPipeline,
         IFSemanticPipeline,
+        IFSemanticImg2ImgPipeline,
         IFImg2ImgSuperResolutionPipeline,
         IFInpaintingPipeline,
         IFInpaintingSuperResolutionPipeline,

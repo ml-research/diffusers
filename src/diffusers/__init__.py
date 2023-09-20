@@ -137,6 +137,7 @@ else:
         CycleDiffusionPipeline,
         IFImg2ImgPipeline,
         IFSemanticPipeline,
+        IFSemanticImg2ImgPipeline,
         IFImg2ImgSuperResolutionPipeline,
         IFInpaintingPipeline,
         IFInpaintingSuperResolutionPipeline,

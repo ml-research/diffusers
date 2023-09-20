@@ -47,6 +47,7 @@ else:
     from .pipeline_if import IFPipeline
     from .pipeline_if_img2img import IFImg2ImgPipeline
     from .pipeline_if_sega import IFSemanticPipeline
+    from .pipeline_if_sega_img2img import IFSemanticImg2ImgPipeline
     from .pipeline_if_img2img_superresolution import IFImg2ImgSuperResolutionPipeline
     from .pipeline_if_inpainting import IFInpaintingPipeline
     from .pipeline_if_inpainting_superresolution import IFInpaintingSuperResolutionPipeline
