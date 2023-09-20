@@ -56,6 +56,7 @@ else:
         IFImg2ImgPipeline,
         IFSemanticPipeline,
         IFSemanticImg2ImgPipeline,
+        IFSemanticSuperResolutionPipeline,
         IFImg2ImgSuperResolutionPipeline,
         IFInpaintingPipeline,
         IFInpaintingSuperResolutionPipeline,

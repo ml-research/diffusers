@@ -3,21 +3,19 @@ import inspect
 import re
 import urllib.parse as ul
 from typing import Any, Callable, Dict, List, Optional, Union
-from itertools import repeat
-
-from diffusers.utils import pt_to_pil
 
 import numpy as np
 import PIL
-from tqdm import tqdm
 import torch
+import torch.nn.functional as F
 from transformers import CLIPImageProcessor, T5EncoderModel, T5Tokenizer
+from tqdm import tqdm
 
+from ...loaders import LoraLoaderMixin
 from ...models import UNet2DConditionModel
-from ...schedulers import DDIMScheduler
+from ...schedulers import DDIMScheduler, DDPMScheduler
 from ...utils import (
     BACKENDS_MAPPING,
-    PIL_INTERPOLATION,
     is_accelerate_available,
     is_accelerate_version,
     is_bs4_available,
@@ -32,29 +30,14 @@ from .safety_checker import IFSafetyChecker
 from .watermark import IFWatermarker
 
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
-
 if is_bs4_available():
     from bs4 import BeautifulSoup
 
 if is_ftfy_available():
     import ftfy
 
-def resize(images: PIL.Image.Image, img_size: int) -> PIL.Image.Image:
-    w, h = images.size
 
-    coef = w / h
-
-    w, h = img_size, img_size
-
-    if coef >= 1:
-        w = int(round(img_size / 8 * coef) * 8)
-    else:
-        h = int(round(img_size / 8 / coef) * 8)
-
-    images = images.resize((w, h), resample=PIL_INTERPOLATION["bicubic"], reducing_gap=None)
-
-    return images
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 EXAMPLE_DOC_STRING = """
@@ -82,38 +65,20 @@ EXAMPLE_DOC_STRING = """
         >>> super_res_1_pipe.enable_model_cpu_offload()
 
         >>> image = super_res_1_pipe(
-        ...     image=image, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds, output_type="pt"
-        ... ).images
-
-        >>> # save intermediate image
-        >>> pil_image = pt_to_pil(image)
-        >>> pil_image[0].save("./if_stage_I.png")
-
-        >>> safety_modules = {
-        ...     "feature_extractor": pipe.feature_extractor,
-        ...     "safety_checker": pipe.safety_checker,
-        ...     "watermarker": pipe.watermarker,
-        ... }
-        >>> super_res_2_pipe = DiffusionPipeline.from_pretrained(
-        ...     "stabilityai/stable-diffusion-x4-upscaler", **safety_modules, torch_dtype=torch.float16
-        ... )
-        >>> super_res_2_pipe.enable_model_cpu_offload()
-
-        >>> image = super_res_2_pipe(
-        ...     prompt=prompt,
-        ...     image=image,
+        ...     image=image, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_embeds
         ... ).images
         >>> image[0].save("./if_stage_II.png")
         ```
 """
 
 
-class IFSemanticImg2ImgPipeline(DiffusionPipeline):
+class IFSemanticSuperResolutionPipeline(DiffusionPipeline, LoraLoaderMixin):
     tokenizer: T5Tokenizer
     text_encoder: T5EncoderModel
 
     unet: UNet2DConditionModel
     scheduler: DDIMScheduler
+    image_noising_scheduler: DDPMScheduler
 
     feature_extractor: Optional[CLIPImageProcessor]
     safety_checker: Optional[IFSafetyChecker]
@@ -132,6 +97,7 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         text_encoder: T5EncoderModel,
         unet: UNet2DConditionModel,
         scheduler: DDIMScheduler,
+        image_noising_scheduler: DDPMScheduler,
         safety_checker: Optional[IFSafetyChecker],
         feature_extractor: Optional[CLIPImageProcessor],
         watermarker: Optional[IFWatermarker],
@@ -145,7 +111,6 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
 
             logger.warning("This pipeline only supports DDIMScheduler. "
                 "The scheduler has been changed to DDIMScheduler.")
-
 
         if safety_checker is None and requires_safety_checker:
             logger.warning(
@@ -163,17 +128,24 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
                 " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
             )
 
+        if unet.config.in_channels != 6:
+            logger.warn(
+                "It seems like you have loaded a checkpoint that shall not be used for super resolution from {unet.config._name_or_path} as it accepts {unet.config.in_channels} input channels instead of 6. Please make sure to pass a super resolution checkpoint as the `'unet'`: IFSuperResolutionPipeline.from_pretrained(unet=super_resolution_unet, ...)`."
+            )
+
         self.register_modules(
             tokenizer=tokenizer,
             text_encoder=text_encoder,
             unet=unet,
             scheduler=scheduler,
+            image_noising_scheduler=image_noising_scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
             watermarker=watermarker,
         )
         self.register_to_config(requires_safety_checker=requires_safety_checker)
 
+    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.enable_model_cpu_offload
     def enable_model_cpu_offload(self, gpu_id=0):
         r"""
         Offloads all models to CPU using accelerate, reducing memory usage with a low impact on performance. Compared
@@ -215,6 +187,7 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         # We'll offload the last model manually.
         self.final_offload_hook = hook
 
+    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.remove_all_hooks
     def remove_all_hooks(self):
         if is_accelerate_available():
             from accelerate.hooks import remove_hook_from_module
@@ -229,280 +202,7 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         self.text_encoder_offload_hook = None
         self.final_offload_hook = None
 
-    @torch.no_grad()
-    def encode_prompt(
-        self,
-        prompt,
-        do_classifier_free_guidance=True,
-        num_images_per_prompt=1,
-        device=None,
-        negative_prompt=None,
-        editing_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        edit_prompt_embeds: Optional[torch.FloatTensor] = None,
-        clean_caption: bool = False,
-    ):
-        r"""
-        Encodes the prompt into text encoder hidden states.
-
-        Args:
-             prompt (`str` or `List[str]`, *optional*):
-                prompt to be encoded
-            device: (`torch.device`, *optional*):
-                torch device to place the resulting embeddings on
-            num_images_per_prompt (`int`, *optional*, defaults to 1):
-                number of images that should be generated per prompt
-            do_classifier_free_guidance (`bool`, *optional*, defaults to `True`):
-                whether to use classifier free guidance or not
-            negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts not to guide the image generation. If not defined, one has to pass
-                `negative_prompt_embeds`. instead. If not defined, one has to pass `negative_prompt_embeds`. instead.
-                Ignored when not using guidance (i.e., ignored if `guidance_scale` is less than `1`).
-            editing_prompt (`str` or `List[str]`, *optional*):
-                The prompt used for semantic guidance
-            prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
-                provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
-                argument.
-        """
-        if prompt is not None and negative_prompt is not None:
-            if type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
-
-        if device is None:
-            device = self._execution_device
-
-        if prompt is not None and isinstance(prompt, str):
-            batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
-        else:
-            batch_size = prompt_embeds.shape[0]
-
-        # while T5 can handle much longer input sequences than 77, the text encoder was trained with a max length of 77 for IF
-        max_length = 77
-
-        if prompt_embeds is None:
-            prompt = self._text_preprocessing(prompt, clean_caption=clean_caption)
-            text_inputs = self.tokenizer(
-                prompt,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                add_special_tokens=True,
-                return_tensors="pt",
-            )
-            text_input_ids = text_inputs.input_ids
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                text_input_ids, untruncated_ids
-            ):
-                removed_text = self.tokenizer.batch_decode(untruncated_ids[:, max_length - 1 : -1])
-                logger.warning(
-                    "The following part of your input was truncated because CLIP can only handle sequences up to"
-                    f" {max_length} tokens: {removed_text}"
-                )
-
-            attention_mask = text_inputs.attention_mask.to(device)
-
-            prompt_embeds = self.text_encoder(
-                text_input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            prompt_embeds = prompt_embeds[0]
-
-        if self.text_encoder is not None:
-            dtype = self.text_encoder.dtype
-        elif self.unet is not None:
-            dtype = self.unet.dtype
-        else:
-            dtype = None
-
-        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
-
-        bs_embed, seq_len, _ = prompt_embeds.shape
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
-
-        # get unconditional embeddings for classifier free guidance
-        if do_classifier_free_guidance and negative_prompt_embeds is None:
-            uncond_tokens: List[str]
-            if negative_prompt is None:
-                uncond_tokens = [""] * batch_size
-            elif isinstance(negative_prompt, str):
-                uncond_tokens = [negative_prompt]
-            elif batch_size != len(negative_prompt):
-                raise ValueError(
-                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                    " the batch size of `prompt`."
-                )
-            else:
-                uncond_tokens = negative_prompt
-
-            uncond_tokens = self._text_preprocessing(uncond_tokens, clean_caption=clean_caption)
-            max_length = prompt_embeds.shape[1]
-            uncond_input = self.tokenizer(
-                uncond_tokens,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                return_attention_mask=True,
-                add_special_tokens=True,
-                return_tensors="pt",
-            )
-            attention_mask = uncond_input.attention_mask.to(device)
-
-            negative_prompt_embeds = self.text_encoder(
-                uncond_input.input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            negative_prompt_embeds = negative_prompt_embeds[0]
-
-        if do_classifier_free_guidance and editing_prompt is not None and edit_prompt_embeds is None:
-            edit_tokens: List[str]
-            if isinstance(editing_prompt, str):
-                edit_tokens = [editing_prompt]
-            else:
-                edit_tokens = editing_prompt
-            edit_tokens = [x for item in edit_tokens for x in repeat(item, batch_size)]
-            edit_tokens = self._text_preprocessing(edit_tokens, clean_caption=clean_caption)
-
-            max_length = prompt_embeds.shape[1]
-            edit_input = self.tokenizer(
-                edit_tokens,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                return_attention_mask=True,
-                add_special_tokens=True,
-                return_tensors="pt",
-            )
-            attention_mask = edit_input.attention_mask.to(device)
-
-            edit_prompt_embeds = self.text_encoder(
-                edit_input.input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            edit_prompt_embeds = edit_prompt_embeds[0]
-
-        if do_classifier_free_guidance:
-            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
-            seq_len = negative_prompt_embeds.shape[1]
-
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=dtype, device=device)
-
-            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-            if editing_prompt is not None:
-                bs_embed_edit, seq_len_edit, _ = edit_prompt_embeds.shape
-                edit_prompt_embeds = edit_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-                edit_prompt_embeds = edit_prompt_embeds.view(bs_embed_edit * num_images_per_prompt, seq_len_edit, -1)
-
-        else:
-            negative_prompt_embeds = None
-            edit_prompt_embeds = None
-
-        return prompt_embeds, negative_prompt_embeds, edit_prompt_embeds
-
-    def run_safety_checker(self, image, device, dtype):
-        if self.safety_checker is not None:
-            safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(device)
-            image, nsfw_detected, watermark_detected = self.safety_checker(
-                images=image,
-                clip_input=safety_checker_input.pixel_values.to(dtype=dtype),
-            )
-        else:
-            nsfw_detected = None
-            watermark_detected = None
-
-            if hasattr(self, "unet_offload_hook") and self.unet_offload_hook is not None:
-                self.unet_offload_hook.offload()
-
-        return image, nsfw_detected, watermark_detected
-
-    # Modified from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
-    def prepare_extra_step_kwargs(self, eta):
-        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
-        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
-        # and should be between [0, 1]
-
-        accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
-        extra_step_kwargs = {}
-        if accepts_eta:
-            extra_step_kwargs["eta"] = eta
-
-        return extra_step_kwargs
-
-    def check_inputs(
-        self,
-        prompt,
-        callback_steps,
-        negative_prompt=None,
-        prompt_embeds=None,
-        negative_prompt_embeds=None,
-    ):
-        if (callback_steps is None) or (
-            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
-        ):
-            raise ValueError(
-                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
-                f" {type(callback_steps)}."
-            )
-
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif prompt is None and prompt_embeds is None:
-            raise ValueError(
-                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-            )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
-
-        if negative_prompt is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
-                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
-            )
-
-        if prompt_embeds is not None and negative_prompt_embeds is not None:
-            if prompt_embeds.shape != negative_prompt_embeds.shape:
-                raise ValueError(
-                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
-                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
-                    f" {negative_prompt_embeds.shape}."
-                )
-
-    # Modified
-    def prepare_intermediate_images(self, batch_size, num_channels, height, width, dtype, device, intermediate_images):
-        shape = (batch_size, num_channels, height, width)
-
-        if intermediate_images.shape != shape:
-            raise ValueError(f"Unexpected image shape, got {intermediate_images.shape}, expected {shape}")
-
-        intermediate_images = intermediate_images.to(device)
-
-        # scale the initial noise by the standard deviation required by the scheduler
-        intermediate_images = intermediate_images * self.scheduler.init_noise_sigma
-        return intermediate_images
-
+    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._text_preprocessing
     def _text_preprocessing(self, text, clean_caption=False):
         if clean_caption and not is_bs4_available():
             logger.warn(BACKENDS_MAPPING["bs4"][-1].format("Setting `clean_caption=True`"))
@@ -527,6 +227,7 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
 
         return [process(t) for t in text]
 
+    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline._clean_caption
     def _clean_caption(self, caption):
         caption = str(caption)
         caption = ul.unquote_plus(caption)
@@ -641,40 +342,310 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
 
         return caption.strip()
 
-    # Copied from diffusers.pipelines.deepfloyed_if.IFImg2ImgPipeline.preprocess_image
-    def preprocess_image(self, image: PIL.Image.Image) -> torch.Tensor:
-        if not isinstance(image, list):
+    @torch.no_grad()
+    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.encode_prompt
+    def encode_prompt(
+        self,
+        prompt,
+        do_classifier_free_guidance=True,
+        num_images_per_prompt=1,
+        device=None,
+        negative_prompt=None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        clean_caption: bool = False,
+    ):
+        r"""
+        Encodes the prompt into text encoder hidden states.
+
+        Args:
+             prompt (`str` or `List[str]`, *optional*):
+                prompt to be encoded
+            device: (`torch.device`, *optional*):
+                torch device to place the resulting embeddings on
+            num_images_per_prompt (`int`, *optional*, defaults to 1):
+                number of images that should be generated per prompt
+            do_classifier_free_guidance (`bool`, *optional*, defaults to `True`):
+                whether to use classifier free guidance or not
+            negative_prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts not to guide the image generation. If not defined, one has to pass
+                `negative_prompt_embeds`. instead. If not defined, one has to pass `negative_prompt_embeds`. instead.
+                Ignored when not using guidance (i.e., ignored if `guidance_scale` is less than `1`).
+            prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
+                provided, text embeddings will be generated from `prompt` input argument.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
+                argument.
+        """
+        if prompt is not None and negative_prompt is not None:
+            if type(prompt) is not type(negative_prompt):
+                raise TypeError(
+                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
+                    f" {type(prompt)}."
+                )
+
+        if device is None:
+            device = self._execution_device
+
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        # while T5 can handle much longer input sequences than 77, the text encoder was trained with a max length of 77 for IF
+        max_length = 77
+
+        if prompt_embeds is None:
+            prompt = self._text_preprocessing(prompt, clean_caption=clean_caption)
+            text_inputs = self.tokenizer(
+                prompt,
+                padding="max_length",
+                max_length=max_length,
+                truncation=True,
+                add_special_tokens=True,
+                return_tensors="pt",
+            )
+            text_input_ids = text_inputs.input_ids
+            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
+                text_input_ids, untruncated_ids
+            ):
+                removed_text = self.tokenizer.batch_decode(untruncated_ids[:, max_length - 1 : -1])
+                logger.warning(
+                    "The following part of your input was truncated because CLIP can only handle sequences up to"
+                    f" {max_length} tokens: {removed_text}"
+                )
+
+            attention_mask = text_inputs.attention_mask.to(device)
+
+            prompt_embeds = self.text_encoder(
+                text_input_ids.to(device),
+                attention_mask=attention_mask,
+            )
+            prompt_embeds = prompt_embeds[0]
+
+        if self.text_encoder is not None:
+            dtype = self.text_encoder.dtype
+        elif self.unet is not None:
+            dtype = self.unet.dtype
+        else:
+            dtype = None
+
+        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+
+        bs_embed, seq_len, _ = prompt_embeds.shape
+        # duplicate text embeddings for each generation per prompt, using mps friendly method
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+        # get unconditional embeddings for classifier free guidance
+        if do_classifier_free_guidance and negative_prompt_embeds is None:
+            uncond_tokens: List[str]
+            if negative_prompt is None:
+                uncond_tokens = [""] * batch_size
+            elif isinstance(negative_prompt, str):
+                uncond_tokens = [negative_prompt]
+            elif batch_size != len(negative_prompt):
+                raise ValueError(
+                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
+                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
+                    " the batch size of `prompt`."
+                )
+            else:
+                uncond_tokens = negative_prompt
+
+            uncond_tokens = self._text_preprocessing(uncond_tokens, clean_caption=clean_caption)
+            max_length = prompt_embeds.shape[1]
+            uncond_input = self.tokenizer(
+                uncond_tokens,
+                padding="max_length",
+                max_length=max_length,
+                truncation=True,
+                return_attention_mask=True,
+                add_special_tokens=True,
+                return_tensors="pt",
+            )
+            attention_mask = uncond_input.attention_mask.to(device)
+
+            negative_prompt_embeds = self.text_encoder(
+                uncond_input.input_ids.to(device),
+                attention_mask=attention_mask,
+            )
+            negative_prompt_embeds = negative_prompt_embeds[0]
+
+        if do_classifier_free_guidance:
+            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
+            seq_len = negative_prompt_embeds.shape[1]
+
+            negative_prompt_embeds = negative_prompt_embeds.to(dtype=dtype, device=device)
+
+            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+            # For classifier free guidance, we need to do two forward passes.
+            # Here we concatenate the unconditional and text embeddings into a single batch
+            # to avoid doing two forward passes
+        else:
+            negative_prompt_embeds = None
+
+        return prompt_embeds, negative_prompt_embeds
+
+    # Copied from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.run_safety_checker
+    def run_safety_checker(self, image, device, dtype):
+        if self.safety_checker is not None:
+            safety_checker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(device)
+            image, nsfw_detected, watermark_detected = self.safety_checker(
+                images=image,
+                clip_input=safety_checker_input.pixel_values.to(dtype=dtype),
+            )
+        else:
+            nsfw_detected = None
+            watermark_detected = None
+
+            if hasattr(self, "unet_offload_hook") and self.unet_offload_hook is not None:
+                self.unet_offload_hook.offload()
+
+        return image, nsfw_detected, watermark_detected
+
+    # Modified from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.prepare_extra_step_kwargs
+    def prepare_extra_step_kwargs(self, eta):
+        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
+        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
+        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # and should be between [0, 1]
+
+        accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        extra_step_kwargs = {}
+        if accepts_eta:
+            extra_step_kwargs["eta"] = eta
+
+        return extra_step_kwargs
+
+    def check_inputs(
+        self,
+        prompt,
+        image,
+        batch_size,
+        noise_level,
+        callback_steps,
+        negative_prompt=None,
+        prompt_embeds=None,
+        negative_prompt_embeds=None,
+    ):
+        if (callback_steps is None) or (
+            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+        ):
+            raise ValueError(
+                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
+                f" {type(callback_steps)}."
+            )
+
+        if prompt is not None and prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
+                " only forward one of the two."
+            )
+        elif prompt is None and prompt_embeds is None:
+            raise ValueError(
+                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
+            )
+        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
+            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+
+        if negative_prompt is not None and negative_prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
+                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
+            )
+
+        if prompt_embeds is not None and negative_prompt_embeds is not None:
+            if prompt_embeds.shape != negative_prompt_embeds.shape:
+                raise ValueError(
+                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
+                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
+                    f" {negative_prompt_embeds.shape}."
+                )
+
+        if noise_level < 0 or noise_level >= self.image_noising_scheduler.config.num_train_timesteps:
+            raise ValueError(
+                f"`noise_level`: {noise_level} must be a valid timestep in `self.noising_scheduler`, [0, {self.image_noising_scheduler.config.num_train_timesteps})"
+            )
+
+        if isinstance(image, list):
+            check_image_type = image[0]
+        else:
+            check_image_type = image
+
+        if (
+            not isinstance(check_image_type, torch.Tensor)
+            and not isinstance(check_image_type, PIL.Image.Image)
+            and not isinstance(check_image_type, np.ndarray)
+        ):
+            raise ValueError(
+                "`image` has to be of type `torch.FloatTensor`, `PIL.Image.Image`, `np.ndarray`, or List[...] but is"
+                f" {type(check_image_type)}"
+            )
+
+        if isinstance(image, list):
+            image_batch_size = len(image)
+        elif isinstance(image, torch.Tensor):
+            image_batch_size = image.shape[0]
+        elif isinstance(image, PIL.Image.Image):
+            image_batch_size = 1
+        elif isinstance(image, np.ndarray):
+            image_batch_size = image.shape[0]
+        else:
+            assert False
+
+        if batch_size != image_batch_size:
+            raise ValueError(f"image batch size: {image_batch_size} must be same as prompt batch size {batch_size}")
+
+    # Modified from diffusers.pipelines.deepfloyd_if.pipeline_if.IFPipeline.prepare_intermediate_images
+    def prepare_intermediate_images(self, batch_size, num_channels, height, width, dtype, device, intermediate_images):
+        shape = (batch_size, num_channels, height, width)
+
+        if intermediate_images.shape != shape:
+            raise ValueError(f"Unexpected image shape, got {intermediate_images.shape}, expected {shape}")
+
+        intermediate_images = intermediate_images.to(device)
+
+        # scale the initial noise by the standard deviation required by the scheduler
+        intermediate_images = intermediate_images * self.scheduler.init_noise_sigma
+        return intermediate_images
+
+    def preprocess_image(self, image, num_images_per_prompt, device):
+        if not isinstance(image, torch.Tensor) and not isinstance(image, list):
             image = [image]
 
-        def numpy_to_pt(images):
-            if images.ndim == 3:
-                images = images[..., None]
-
-            images = torch.from_numpy(images.transpose(0, 3, 1, 2))
-            return images
-
         if isinstance(image[0], PIL.Image.Image):
-            new_image = []
-
-            for image_ in image:
-                image_ = image_.convert("RGB")
-                image_ = resize(image_, self.unet.sample_size)
-                image_ = np.array(image_)
-                image_ = image_.astype(np.float32)
-                image_ = image_ / 127.5 - 1
-                new_image.append(image_)
-
-            image = new_image
+            image = [np.array(i).astype(np.float32) / 127.5 - 1.0 for i in image]
 
             image = np.stack(image, axis=0)  # to np
-            image = numpy_to_pt(image)  # to pt
-
+            image = torch.from_numpy(image.transpose(0, 3, 1, 2))
         elif isinstance(image[0], np.ndarray):
-            image = np.concatenate(image, axis=0) if image[0].ndim == 4 else np.stack(image, axis=0)
-            image = numpy_to_pt(image)
+            image = np.stack(image, axis=0)  # to np
+            if image.ndim == 5:
+                image = image[0]
 
-        elif isinstance(image[0], torch.Tensor):
-            image = torch.cat(image, axis=0) if image[0].ndim == 4 else torch.stack(image, axis=0)
+            image = torch.from_numpy(image.transpose(0, 3, 1, 2))
+        elif isinstance(image, list) and isinstance(image[0], torch.Tensor):
+            dims = image[0].ndim
+
+            if dims == 3:
+                image = torch.stack(image, dim=0)
+            elif dims == 4:
+                image = torch.concat(image, dim=0)
+            else:
+                raise ValueError(f"Image must have 3 or 4 dimensions, instead got {dims}")
+
+        image = image.to(device=device, dtype=self.unet.dtype)
+
+        image = image.repeat_interleave(num_images_per_prompt, dim=0)
 
         return image
 
@@ -683,33 +654,25 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
-        #num_inference_steps: int = 100,
+        #height: int = None,
+        #width: int = None,
+        image: Union[PIL.Image.Image, np.ndarray, torch.FloatTensor] = None,
+        #num_inference_steps: int = 50,
         #timesteps: List[int] = None,
-        guidance_scale: float = 7.0,
+        guidance_scale: float = 4.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        editing_prompt: Optional[Union[str, List[str]]] = None,
         #num_images_per_prompt: Optional[int] = 1,
-        #height: Optional[int] = None,
-        #width: Optional[int] = None,
         #eta: float = 0.0,
         #generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        edit_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
-        clean_caption: bool = True,
-        reverse_editing_direction: Optional[Union[bool, List[bool]]] = False,
-        edit_guidance_scale: Optional[Union[float, List[float]]] = 5,
-        edit_warmup_steps: Optional[Union[int, List[int]]] = 10,
-        edit_cooldown_steps: Optional[Union[int, List[int]]] = None,
-        edit_threshold: Optional[Union[float, List[float]]] = 0.9,
-        edit_momentum_scale: Optional[float] = 0.1,
-        edit_mom_beta: Optional[float] = 0.4,
-        edit_weights: Optional[List[float]] = None,
         #cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        #noise_level: int = 250,
+        clean_caption: bool = True,
     ):
         """
         Function invoked when calling the pipeline for generation.
@@ -718,6 +681,12 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
+            height (`int`, *optional*, defaults to self.unet.config.sample_size):
+                The height in pixels of the generated image.
+            width (`int`, *optional*, defaults to self.unet.config.sample_size):
+                The width in pixels of the generated image.
+            image (`PIL.Image.Image`, `np.ndarray`, `torch.FloatTensor`):
+                The image to be upscaled.
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
@@ -736,10 +705,6 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
                 less than `1`).
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
-            height (`int`, *optional*, defaults to self.unet.config.sample_size):
-                The height in pixels of the generated image.
-            width (`int`, *optional*, defaults to self.unet.config.sample_size):
-                The width in pixels of the generated image.
             eta (`float`, *optional*, defaults to 0.0):
                 Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
                 [`schedulers.DDIMScheduler`], will be ignored for others.
@@ -764,14 +729,16 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
             callback_steps (`int`, *optional*, defaults to 1):
                 The frequency at which the `callback` function will be called. If not specified, the callback will be
                 called at every step.
+            cross_attention_kwargs (`dict`, *optional*):
+                A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
+                `self.processor` in
+                [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
+            noise_level (`int`, *optional*, defaults to 250):
+                The amount of noise to add to the upscaled image. Must be in the range `[0, 1000)`
             clean_caption (`bool`, *optional*, defaults to `True`):
                 Whether or not to clean the caption before creating embeddings. Requires `beautifulsoup4` and `ftfy` to
                 be installed. If the dependencies are not installed, the embeddings will be created from the raw
                 prompt.
-            cross_attention_kwargs (`dict`, *optional*):
-                A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
-                `self.processor` in
-                [diffusers.cross_attention](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/cross_attention.py).
 
         Examples:
 
@@ -786,22 +753,20 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         num_inference_steps = self.num_inversion_steps
         num_images_per_prompt = 1
         cross_attention_kwargs = None
+
+        noise_level = 0
+        noise_level = torch.tensor([noise_level] * self.upscaled.shape[0], device=self.upscaled.device)
+
         intermediate_images = self.init_images
 
         use_ddpm = True
         zs = self.zs
-        wts = self.wts
 
         # 0. Default height and width
         height = self.unet.config.sample_size
         width = self.unet.config.sample_size
 
         # 1. Check inputs. Raise error if not correct
-        self.check_inputs(prompt, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds)
-
-        # 2. Define call parameters
-        height = height or self.unet.config.sample_size
-        width = width or self.unet.config.sample_size
 
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
@@ -810,6 +775,21 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         else:
             batch_size = prompt_embeds.shape[0]
 
+        self.check_inputs(
+            prompt,
+            image,
+            batch_size,
+            noise_level,
+            callback_steps,
+            negative_prompt,
+            prompt_embeds,
+            negative_prompt_embeds,
+        )
+
+        # 2. Define call parameters
+        height = self.unet.config.sample_size
+        width = self.unet.config.sample_size
+
         device = self._execution_device
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
@@ -817,48 +797,30 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        if editing_prompt:
-            enable_edit_guidance = True
-            if isinstance(editing_prompt, str):
-                editing_prompt = [editing_prompt]
-            enabled_editing_prompts = len(editing_prompt)
-        elif edit_prompt_embeds is not None:
-            enable_edit_guidance = True
-            enabled_editing_prompts = int(edit_prompt_embeds.shape[0] / batch_size)
-        else:
-            enabled_editing_prompts = 0
-            enable_edit_guidance = False
-
         # 3. Encode input prompt
-        prompt_embeds, negative_prompt_embeds, edit_prompt_embeds = self.encode_prompt(
+        prompt_embeds, negative_prompt_embeds = self.encode_prompt(
             prompt,
             do_classifier_free_guidance,
             num_images_per_prompt=num_images_per_prompt,
             device=device,
             negative_prompt=negative_prompt,
-            editing_prompt=editing_prompt,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
-            edit_prompt_embeds=edit_prompt_embeds,
             clean_caption=clean_caption,
         )
 
         if do_classifier_free_guidance:
-            if enable_edit_guidance:
-                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, edit_prompt_embeds])
-            else:
-                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
 
         # 4. Prepare timesteps
         timesteps = self.scheduler.timesteps
-        if use_ddpm:
-            t_to_idx = {int(v):k for k,v in enumerate(timesteps[-zs.shape[0]:])}
-            timesteps = timesteps[-zs.shape[0]:]
+        t_to_idx = {int(v):k for k,v in enumerate(timesteps[-zs.shape[0]:])}
 
         # 5. Prepare intermediate images
+        num_channels = self.unet.config.in_channels // 2
         intermediate_images = self.prepare_intermediate_images(
             batch_size * num_images_per_prompt,
-            self.unet.config.in_channels,
+            num_channels,
             height,
             width,
             prompt_embeds.dtype,
@@ -869,20 +831,23 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(eta)
 
+        # 7. Prepare upscaled image and noise level
+        upscaled = self.upscaled
+
+        if do_classifier_free_guidance:
+            noise_level = torch.cat([noise_level] * 2)
+
         # HACK: see comment in `enable_model_cpu_offload`
         if hasattr(self, "text_encoder_offload_hook") and self.text_encoder_offload_hook is not None:
             self.text_encoder_offload_hook.offload()
 
-        # Initialize edit_momentum to None
-        edit_momentum = None
-
-        # 7. Denoising loop
+        # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        with self.progress_bar(total=len(timesteps)) as progress_bar:
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                model_input = (
-                    torch.cat([intermediate_images] * (2 + enabled_editing_prompts)) if do_classifier_free_guidance else intermediate_images
-                )
+                model_input = torch.cat([intermediate_images, upscaled], dim=1)
+
+                model_input = torch.cat([model_input] * 2) if do_classifier_free_guidance else model_input
                 model_input = self.scheduler.scale_model_input(model_input, t)
 
                 # predict the noise residual
@@ -890,166 +855,21 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
                     model_input,
                     t,
                     encoder_hidden_states=prompt_embeds,
+                    class_labels=noise_level,
                     cross_attention_kwargs=cross_attention_kwargs,
                     return_dict=False,
                 )[0]
 
                 # perform guidance
                 if do_classifier_free_guidance:
-                    noise_pred_out = noise_pred.chunk(2 + enabled_editing_prompts)  # [b,4, 64, 64]
-                    noise_pred_uncond, noise_pred_text = noise_pred_out[0], noise_pred_out[1]
-
-
-                    noise_pred_uncond, _ = noise_pred_uncond.split(model_input.shape[1], dim=1)
-                    noise_pred_text, predicted_variance = noise_pred_text.split(model_input.shape[1], dim=1)
-
-                    # default text guidance
-                    noise_guidance = (noise_pred_text - noise_pred_uncond) * guidance_scale
-                    if edit_momentum is None:
-                        edit_momentum = torch.zeros_like(noise_guidance)
-
-                    if enable_edit_guidance:
-                        noise_pred_edit_concepts = noise_pred_out[2:]
-                        tmp = noise_pred_edit_concepts[0]
-                        tmp, _ = tmp.split(model_input.shape[1], dim=1)
-
-                        concept_weights = torch.zeros(
-                            (len(tmp), noise_guidance.shape[0]),
-                            device=edit_momentum.device,
-                            dtype=noise_guidance.dtype,
-                        )
-                        noise_guidance_edit = torch.zeros(
-                            (len(tmp), *noise_guidance.shape),
-                            device=edit_momentum.device,
-                            dtype=noise_guidance.dtype,
-                        )
-                        # noise_guidance_edit = torch.zeros_like(noise_guidance)
-                        warmup_inds = []
-                        for c, noise_pred_edit_concept in enumerate(noise_pred_edit_concepts):
-                            noise_pred_edit_concept, _ = noise_pred_edit_concept.split(model_input.shape[1], dim=1)
-                            if isinstance(edit_guidance_scale, list):
-                                edit_guidance_scale_c = edit_guidance_scale[c]
-                            else:
-                                edit_guidance_scale_c = edit_guidance_scale
-
-                            if isinstance(edit_threshold, list):
-                                edit_threshold_c = edit_threshold[c]
-                            else:
-                                edit_threshold_c = edit_threshold
-                            if isinstance(reverse_editing_direction, list):
-                                reverse_editing_direction_c = reverse_editing_direction[c]
-                            else:
-                                reverse_editing_direction_c = reverse_editing_direction
-                            if edit_weights:
-                                edit_weight_c = edit_weights[c]
-                            else:
-                                edit_weight_c = 1.0
-                            if isinstance(edit_warmup_steps, list):
-                                edit_warmup_steps_c = edit_warmup_steps[c]
-                            else:
-                                edit_warmup_steps_c = edit_warmup_steps
-
-                            if isinstance(edit_cooldown_steps, list):
-                                edit_cooldown_steps_c = edit_cooldown_steps[c]
-                            elif edit_cooldown_steps is None:
-                                edit_cooldown_steps_c = i + 1
-                            else:
-                                edit_cooldown_steps_c = edit_cooldown_steps
-                            if i >= edit_warmup_steps_c:
-                                warmup_inds.append(c)
-                            if i >= edit_cooldown_steps_c:
-                                noise_guidance_edit[c, :, :, :, :] = torch.zeros_like(noise_pred_edit_concept)
-                                continue
-
-                            noise_guidance_edit_tmp = noise_pred_edit_concept - noise_pred_uncond
-                            # tmp_weights = (noise_pred_text - noise_pred_edit_concept).sum(dim=(1, 2, 3))
-                            tmp_weights = (noise_guidance - noise_pred_edit_concept).sum(dim=(1, 2, 3))
-
-                            tmp_weights = torch.full_like(tmp_weights, edit_weight_c)  # * (1 / enabled_editing_prompts)
-                            if reverse_editing_direction_c:
-                                noise_guidance_edit_tmp = noise_guidance_edit_tmp * -1
-                            concept_weights[c, :] = tmp_weights
-
-                            noise_guidance_edit_tmp = noise_guidance_edit_tmp * edit_guidance_scale_c
-
-                            # calculate quantile
-                            noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
-                            noise_guidance_edit_tmp_quantile = torch.sum(noise_guidance_edit_tmp_quantile, dim=1, keepdim=True)
-                            noise_guidance_edit_tmp_quantile = noise_guidance_edit_tmp_quantile.repeat(1,noise_guidance_edit_tmp.shape[1],1,1)
-
-                            # torch.quantile function expects float32
-                            if noise_guidance_edit_tmp_quantile.dtype == torch.float32:
-                                tmp = torch.quantile(
-                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2),
-                                    edit_threshold_c,
-                                    dim=2,
-                                    keepdim=False,
-                                )
-                            else:
-                                tmp = torch.quantile(
-                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2).to(torch.float32),
-                                    edit_threshold_c,
-                                    dim=2,
-                                    keepdim=False,
-                                ).to(noise_guidance_edit_tmp_quantile.dtype)
-
-                            noise_guidance_edit_tmp = torch.where(
-                                noise_guidance_edit_tmp_quantile >= tmp[:, :, None, None],
-                                noise_guidance_edit_tmp,
-                                torch.zeros_like(noise_guidance_edit_tmp),
-                            )
-                            noise_guidance_edit[c, :, :, :, :] = noise_guidance_edit_tmp
-
-                        warmup_inds = torch.tensor(warmup_inds).to(self.device)
-                        if len(noise_pred_edit_concepts) > warmup_inds.shape[0] > 0:
-                            concept_weights = concept_weights.to("cpu")  # Offload to cpu
-                            noise_guidance_edit = noise_guidance_edit.to("cpu")
-
-                            concept_weights_tmp = torch.index_select(concept_weights.to(self.device), 0, warmup_inds)
-                            concept_weights_tmp = torch.where(
-                                concept_weights_tmp < 0, torch.zeros_like(concept_weights_tmp), concept_weights_tmp
-                            )
-                            concept_weights_tmp = concept_weights_tmp / concept_weights_tmp.sum(dim=0)
-                            # concept_weights_tmp = torch.nan_to_num(concept_weights_tmp)
-
-                            noise_guidance_edit_tmp = torch.index_select(
-                                noise_guidance_edit.to(self.device), 0, warmup_inds
-                            )
-                            noise_guidance_edit_tmp = torch.einsum(
-                                "cb,cbijk->bijk", concept_weights_tmp, noise_guidance_edit_tmp
-                            )
-                            noise_guidance_edit_tmp = noise_guidance_edit_tmp
-                            noise_guidance = noise_guidance + noise_guidance_edit_tmp
-
-                            self.sem_guidance[i] = noise_guidance_edit_tmp.detach().cpu()
-
-                            del noise_guidance_edit_tmp
-                            del concept_weights_tmp
-                            concept_weights = concept_weights.to(self.device)
-                            noise_guidance_edit = noise_guidance_edit.to(self.device)
-
-                        concept_weights = torch.where(
-                            concept_weights < 0, torch.zeros_like(concept_weights), concept_weights
-                        )
-
-                        concept_weights = torch.nan_to_num(concept_weights)
-
-                        noise_guidance_edit = torch.einsum("cb,cbijk->bijk", concept_weights, noise_guidance_edit)
-
-                        noise_guidance_edit = noise_guidance_edit + edit_momentum_scale * edit_momentum
-
-                        edit_momentum = edit_mom_beta * edit_momentum + (1 - edit_mom_beta) * noise_guidance_edit
-
-                        if warmup_inds.shape[0] == len(noise_pred_edit_concepts):
-                            #print(noise_guidance.device, noise_guidance_edit.device)
-                            noise_guidance = noise_guidance + noise_guidance_edit
-
-
-                    noise_pred = noise_pred_uncond + noise_guidance
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred_uncond, _ = noise_pred_uncond.split(model_input.shape[1] // 2, dim=1)
+                    noise_pred_text, predicted_variance = noise_pred_text.split(model_input.shape[1] // 2, dim=1)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                     noise_pred = torch.cat([noise_pred, predicted_variance], dim=1)
 
                 if self.scheduler.config.variance_type not in ["learned", "learned_range"]:
-                    noise_pred, _ = noise_pred.split(model_input.shape[1], dim=1)
+                    noise_pred, _ = noise_pred.split(intermediate_images.shape[1], dim=1)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if use_ddpm:
@@ -1071,19 +891,19 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         image = intermediate_images
 
         if output_type == "pil":
-            # 8. Post-processing
+            # 9. Post-processing
             image = (image / 2 + 0.5).clamp(0, 1)
             image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
-            # 9. Run safety checker
+            # 10. Run safety checker
             image, nsfw_detected, watermark_detected = self.run_safety_checker(image, device, prompt_embeds.dtype)
 
-            # 10. Convert to PIL
+            # 11. Convert to PIL
             image = self.numpy_to_pil(image)
 
-            # 11. Apply watermark
+            # 12. Apply watermark
             if self.watermarker is not None:
-                image = self.watermarker.apply_watermark(image, self.unet.config.sample_size)
+                self.watermarker.apply_watermark(image, self.unet.config.sample_size)
         elif output_type == "pt":
             nsfw_detected = None
             watermark_detected = None
@@ -1091,11 +911,11 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
             if hasattr(self, "unet_offload_hook") and self.unet_offload_hook is not None:
                 self.unet_offload_hook.offload()
         else:
-            # 8. Post-processing
+            # 9. Post-processing
             image = (image / 2 + 0.5).clamp(0, 1)
             image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
-            # 9. Run safety checker
+            # 10. Run safety checker
             image, nsfw_detected, watermark_detected = self.run_safety_checker(image, device, prompt_embeds.dtype)
 
         # Offload last model to CPU
@@ -1110,84 +930,113 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
 
     @torch.no_grad()
     def invert(self,
-                image_path: str,
-                source_prompt: str = "",
-                source_guidance_scale = 3.5,
-                num_inversion_steps: int = 100,
-                skip_steps: int = 35,
+                image_path_original: str,
+                image: Union[PIL.Image.Image, np.ndarray, torch.FloatTensor] = None,
+                source_prompt: Union[str, List[str]] = None,
+                source_guidance_scale: float = 3.5,
+                num_inversion_steps: int = 50,
+                noise_level: int = 0,
+                clean_caption: bool = True,
                 eta: float = 1.0,
                 generator: Optional[torch.Generator] = None
         ):
-        """
-        Inverts a real image according to Algorihm 1 in https://arxiv.org/pdf/2304.06140.pdf,
-        based on the code in https://github.com/inbarhub/DDPM_inversion
 
-        returns:
-        zs - noise maps
-        xts - intermediate inverted latents
-        """
         self.eta = eta
         assert(self.eta > 0)
 
         device = self._execution_device
         dtype = self.text_encoder.dtype
+        num_images_per_prompt = 1
+
+        height = self.unet.config.sample_size
+        width = self.unet.config.sample_size
 
         self.num_inversion_steps = num_inversion_steps
-        self.scheduler.set_timesteps(self.num_inversion_steps)
+        self.scheduler.set_timesteps(self.num_inversion_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 1. get embeddings
-        text_embeddings, uncond_embedding, _ = self.encode_prompt(source_prompt)
-        prompt_embeds = torch.cat([uncond_embedding, text_embeddings])
+        # 1. get text embeddings
+        prompt_embeds, negative_prompt_embeds = self.encode_prompt(
+            source_prompt,
+            do_classifier_free_guidance=True,
+            num_images_per_prompt=num_images_per_prompt,
+            device=device,
+            negative_prompt=None,
+            clean_caption=clean_caption,
+        )
+        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
 
-        # 2. open image
-        image = PIL.Image.open(image_path).convert('RGB')
-        x0 = self.preprocess_image(image)
+        # 2. Prepare images
+
+        # upscaled image
+        image = self.preprocess_image(image, num_images_per_prompt, device)
+        upscaled = F.interpolate(image, (height, width), mode="bilinear", align_corners=True)
+
+        noise_level = torch.tensor([noise_level] * upscaled.shape[0], device=upscaled.device)
+        noise = randn_tensor(upscaled.shape, generator=generator, device=upscaled.device, dtype=upscaled.dtype)
+        upscaled = self.image_noising_scheduler.add_noise(upscaled, noise, timesteps=noise_level)
+        self.upscaled = upscaled
+        print(upscaled.shape)
+
+        # original image
+        x0 = PIL.Image.open(image_path_original).convert('RGB').resize((256,256))
+        x0 = self.preprocess_image(x0, num_images_per_prompt, device)
         x0 = x0.to(device=device, dtype=dtype)
+        print(x0.shape)
 
-        # 3. find zs and xts
-        variance_noise_shape = (
-            self.num_inversion_steps,
-            self.unet.config.in_channels,
-            self.unet.sample_size,
-            self.unet.sample_size)
-
-        # intermediate latents
-        t_to_idx = {int(v):k for k,v in enumerate(timesteps)}
-        xts = torch.zeros(size=variance_noise_shape, device=device, dtype=uncond_embedding.dtype)
-
-        for t in reversed(timesteps):
-            idx = t_to_idx[int(t)]
-            noise = randn_tensor(shape=x0.shape, generator=generator, device=device, dtype=x0.dtype)
-            xts[idx] = self.scheduler.add_noise(x0, noise, t)
-
-        xts = torch.cat([xts, x0 ],dim = 0)
-
-        # noise maps
-        zs = torch.zeros(size=variance_noise_shape, device=device, dtype=uncond_embedding.dtype)
+        noise_level = torch.cat([noise_level] * 2)
 
         if hasattr(self, "text_encoder_offload_hook") and self.text_encoder_offload_hook is not None:
             self.text_encoder_offload_hook.offload()
 
+        # 3. find zs and xts
+        image_shape = (
+            self.num_inversion_steps,
+            self.unet.config.in_channels // 2,
+            height,
+            width
+        )
+        print(image_shape)
+
+        t_to_idx = {int(v):k for k,v in enumerate(timesteps)}
+        xts = torch.zeros(size=image_shape, device=device, dtype=prompt_embeds.dtype)
+
+        # noisy images
+        for t in reversed(timesteps):
+            idx = t_to_idx[int(t)]
+            noise = randn_tensor(shape=x0.shape, generator=generator, device=device, dtype=x0.dtype)
+            noised_x0 = self.scheduler.add_noise(x0, noise, t)
+            xts[idx] = noised_x0
+        
+        xts = torch.cat([xts, x0 ],dim = 0)
+
+        # noise maps
+        zs = torch.zeros(size=image_shape, device=device, dtype=prompt_embeds.dtype)
+
+        
         for t in tqdm(timesteps):
             idx = t_to_idx[int(t)]
 
-            # 1. predict noise residual
             xt = xts[idx][None]
-            model_input = torch.cat([xt] * 2)
+            model_input = torch.cat([xt, upscaled], dim=1)
+            model_input = torch.cat([model_input] * 2)
+            model_input = self.scheduler.scale_model_input(model_input, t)
+
+            # predict the noise residual
             noise_pred = self.unet(
                 model_input,
-                timestep=t,
+                t,
                 encoder_hidden_states=prompt_embeds,
+                class_labels=noise_level,
                 cross_attention_kwargs=None,
-                return_dict=False
+                return_dict=False,
             )[0]
 
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred_uncond, _ = noise_pred_uncond.split(model_input.shape[1], dim=1)
-            noise_pred_text, predicted_variance = noise_pred_text.split(model_input.shape[1], dim=1)
-
-            noise_pred = noise_pred_uncond + (noise_pred_text - noise_pred_uncond) * source_guidance_scale
+            noise_pred_uncond, _ = noise_pred_uncond.split(model_input.shape[1] // 2, dim=1)
+            noise_pred_text, predicted_variance = noise_pred_text.split(model_input.shape[1] // 2, dim=1)
+            noise_pred = noise_pred_uncond + source_guidance_scale * (noise_pred_text - noise_pred_uncond)
+            #noise_pred = torch.cat([noise_pred, predicted_variance], dim=1)
 
             xtm1 =  xts[idx+1][None]
             z, xtm1_corrected = compute_noise(self.scheduler, xtm1, xt, t, noise_pred, eta)
@@ -1196,18 +1045,16 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
             # correction to avoid error accumulation
             xts[idx+1] = xtm1_corrected
 
-        # TODO: I don't think that the noise map for the last step should be discarded ?!
-        # if not zs is None:
-        #     zs[-1] = torch.zeros_like(zs[-1])
-
-        self.init_images = xts[skip_steps].expand(1, -1, -1, -1)
-        self.zs = zs[skip_steps:]
-        self.wts = xts
+        self.init_images = xts[0].expand(1, -1, -1, -1)
+        self.zs = zs
 
         if hasattr(self, "unet_offload_hook") and self.unet_offload_hook is not None:
+            print("unet offload hook")
             self.unet_offload_hook.offload()
-
+        
+        # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
+            print("final offload hook")
             self.final_offload_hook.offload()
 
         return zs, xts
