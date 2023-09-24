@@ -1557,6 +1557,9 @@ class SemanticStableDiffusionXLImg2ImgPipeline_DDPMInversion(DiffusionPipeline, 
 
         device = self._execution_device
 
+        # Reset attn processor, we do not want to store attn maps during inversion
+        self.unet.set_default_attn_processor()
+
         # 0. Ensure that only uncond embedding is used if prompt = ""
         if source_prompt == "" and \
             (source_prompt_2 == "" or source_prompt_2 is None):
