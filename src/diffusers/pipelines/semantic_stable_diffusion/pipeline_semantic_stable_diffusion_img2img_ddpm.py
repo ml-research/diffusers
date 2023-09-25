@@ -447,6 +447,7 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         sem_guidance: Optional[List[torch.Tensor]] = None,
         # Cross-attention masking
         use_cross_attn_mask: bool = False,
+        use_intersect_mask: bool = False,
         edit_tokens_for_attn_map: List[str] = None,
         # Attention store (just for visualization purposes)
         attn_store_steps: Optional[List[int]] = [],
@@ -557,6 +558,9 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
         use_ddpm = True
         zs = self.zs
         wts = self.wts
+
+        if use_intersect_mask:
+            use_cross_attn_mask = True
 
         if use_cross_attn_mask:
             self.smoothing = GaussianSmoothing(self.device)
@@ -928,8 +932,18 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
                             attn_map = F.pad(attn_map.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="reflect")
                             attn_map = self.smoothing(attn_map).squeeze(0).squeeze(0)
 
-                            # create binary mask
-                            tmp = torch.quantile(attn_map.flatten(),edit_threshold_c)
+                            # torch.quantile function expects float32
+                            if attn_map.dtype == torch.float32:
+                                tmp = torch.quantile(
+                                    attn_map.flatten(),
+                                    edit_threshold_c
+                                )
+                            else:
+                                tmp = torch.quantile(
+                                    attn_map.flatten().to(torch.float32),
+                                    edit_threshold_c
+                                ).to(attn_map.dtype)
+
                             attn_mask = torch.where(attn_map >= tmp, 1.0, 0.0)
 
                             # resolution must match latent space dimension
@@ -938,8 +952,39 @@ class SemanticStableDiffusionImg2ImgPipeline_DDPMInversion(DiffusionPipeline):
                                 noise_guidance_edit_tmp.shape[-2:] # 64,64
                             )[0,0,:,:]
 
-                            noise_guidance_edit_tmp = noise_guidance_edit_tmp * attn_mask
-                        else:
+                            if not use_intersect_mask:
+                                noise_guidance_edit_tmp = noise_guidance_edit_tmp * attn_mask
+
+                        if use_intersect_mask:
+                            noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
+                            noise_guidance_edit_tmp_quantile = torch.sum(noise_guidance_edit_tmp_quantile, dim=1, keepdim=True)
+                            noise_guidance_edit_tmp_quantile = noise_guidance_edit_tmp_quantile.repeat(1,4,1,1)
+
+                            if noise_guidance_edit_tmp_quantile.dtype == torch.float32:
+                                tmp = torch.quantile(
+                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2),
+                                    edit_threshold_c,
+                                    dim=2,
+                                    keepdim=False,
+                                )
+                            else:
+                                tmp = torch.quantile(
+                                    noise_guidance_edit_tmp_quantile.flatten(start_dim=2).to(torch.float32),
+                                    edit_threshold_c,
+                                    dim=2,
+                                    keepdim=False,
+                                ).to(noise_guidance_edit_tmp_quantile.dtype)
+
+                            sega_mask = torch.where(
+                                noise_guidance_edit_tmp_quantile >= tmp[:, :, None, None],
+                                torch.ones_like(noise_guidance_edit_tmp),
+                                torch.zeros_like(noise_guidance_edit_tmp),
+                            )
+
+                            intersect_mask = sega_mask * attn_mask
+                            noise_guidance_edit_tmp = noise_guidance_edit_tmp * intersect_mask
+
+                        elif not use_cross_attn_mask:
                             # calculate quantile
                             noise_guidance_edit_tmp_quantile = torch.abs(noise_guidance_edit_tmp)
                             noise_guidance_edit_tmp_quantile = torch.sum(noise_guidance_edit_tmp_quantile, dim=1, keepdim=True)
