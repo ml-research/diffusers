@@ -641,6 +641,27 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
 
         return caption.strip()
 
+    def crop(self,image_path, left=0, right=0, top=0, bottom=0, size=64):
+        if type(image_path) is str:
+            image = np.array(PIL.Image.open(image_path).convert('RGB'))[:, :, :3]
+        else:
+            image = image_path
+        h, w, c = image.shape
+        left = min(left, w-1)
+        right = min(right, w - left - 1)
+        top = min(top, h - left - 1)
+        bottom = min(bottom, h - top - 1)
+        image = image[top:h-bottom, left:w-right]
+        h, w, c = image.shape
+        if h < w:
+            offset = (w - h) // 2
+            image = image[:, offset:offset + h]
+        elif w < h:
+            offset = (h - w) // 2
+            image = image[offset:offset + w]
+        image = PIL.Image.fromarray(image).resize((size, size))
+        return image
+
     # Copied from diffusers.pipelines.deepfloyed_if.IFImg2ImgPipeline.preprocess_image
     def preprocess_image(self, image: PIL.Image.Image) -> torch.Tensor:
         if not isinstance(image, list):
@@ -710,6 +731,7 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         edit_mom_beta: Optional[float] = 0.4,
         edit_weights: Optional[List[float]] = None,
         #cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        use_cross_attn_mask: bool = False
     ):
         """
         Function invoked when calling the pipeline for generation.
@@ -782,6 +804,9 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
             of `bool`s denoting whether the corresponding generated image likely represents "not-safe-for-work" (nsfw)
             or watermarked content, according to the `safety_checker`.
         """
+        if use_cross_attn_mask:
+            raise NotImplementedError
+
         eta = self.eta
         num_inference_steps = self.num_inversion_steps
         num_images_per_prompt = 1
@@ -1141,7 +1166,7 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         prompt_embeds = torch.cat([uncond_embedding, text_embeddings])
 
         # 2. open image
-        image = PIL.Image.open(image_path).convert('RGB')
+        image = self.crop(image_path)
         x0 = self.preprocess_image(image)
         x0 = x0.to(device=device, dtype=dtype)
 
