@@ -316,8 +316,11 @@ class IFSemanticImg2ImgPipeline(DiffusionPipeline):
         super().__init__()
 
         if not isinstance(scheduler, DDIMScheduler):
-            scheduler = DDIMScheduler.from_config(scheduler.config)
-            scheduler.config.variance_type = "fixed"
+            conf = scheduler.config
+            conf["clip_sample"] = False
+            conf["thresholding"] = False
+            conf["variance_type"] = "fixed"
+            scheduler = DDIMScheduler.from_config(conf)
 
             logger.warning("This pipeline only supports DDIMScheduler. "
                 "The scheduler has been changed to DDIMScheduler.")
