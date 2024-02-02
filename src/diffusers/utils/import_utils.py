@@ -391,7 +391,8 @@ def is_torchsde_available():
 
 
 def is_invisible_watermark_available():
-    return _invisible_watermark_available
+    return False
+    #return _invisible_watermark_available
 
 
 # docstyle-ignore
