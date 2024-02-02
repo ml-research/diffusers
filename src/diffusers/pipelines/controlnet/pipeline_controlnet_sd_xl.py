@@ -46,9 +46,6 @@ from ..pipeline_utils import DiffusionPipeline
 from ..stable_diffusion_xl import StableDiffusionXLPipelineOutput
 
 
-if is_invisible_watermark_available():
-    from ..stable_diffusion_xl.watermark import StableDiffusionXLWatermarker
-
 from .multicontrolnet import MultiControlNetModel
 
 
@@ -139,10 +136,8 @@ class StableDiffusionXLControlNetPipeline(DiffusionPipeline, TextualInversionLoa
         )
         add_watermarker = add_watermarker if add_watermarker is not None else is_invisible_watermark_available()
 
-        if add_watermarker:
-            self.watermark = StableDiffusionXLWatermarker()
-        else:
-            self.watermark = None
+
+        self.watermark = None
 
         self.register_to_config(force_zeros_for_empty_prompt=force_zeros_for_empty_prompt)
 
