@@ -42,10 +42,6 @@ from ..pipeline_utils import DiffusionPipeline
 from . import StableDiffusionXLPipelineOutput
 
 
-if is_invisible_watermark_available():
-    from .watermark import StableDiffusionXLWatermarker
-
-
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
@@ -295,10 +291,8 @@ class StableDiffusionXLInpaintPipeline(
 
         add_watermarker = add_watermarker if add_watermarker is not None else is_invisible_watermark_available()
 
-        if add_watermarker:
-            self.watermark = StableDiffusionXLWatermarker()
-        else:
-            self.watermark = None
+
+        self.watermark = None
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
     def enable_vae_slicing(self):
