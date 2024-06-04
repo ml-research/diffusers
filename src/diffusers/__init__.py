@@ -263,6 +263,7 @@ else:
             "LDMTextToImagePipeline",
             "LEditsPPPipelineStableDiffusion",
             "LEditsPPPipelineStableDiffusionXL",
+            "LEditsPPPipelineHunyuan",
             "MarigoldDepthPipeline",
             "MarigoldNormalsPipeline",
             "MusicLDMPipeline",
