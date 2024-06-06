@@ -420,6 +420,14 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         latents = latents * self.scheduler.init_noise_sigma
         return latents
 
+    @property
+    def num_timesteps(self):
+        return self._num_timesteps
+
+    @property
+    def interrupt(self):
+        return self._interrupt
+
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -652,10 +660,9 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         print("prompt_embeds", prompt_embeds.shape)
         print("prompt_attention_mask", prompt_attention_mask.shape)
         print("prompt_embeds_2", prompt_embeds_2.shape)
-        prompt_embeds_2 = prompt_embeds_2[:,:,::2]
         print("resize prompt_embeds_2", prompt_embeds_2.shape)
         print("prompt_attention_mask_2", prompt_attention_mask_2.shape)
-        print("add_time_ids", add_time_ids.shape)
+
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
@@ -665,13 +672,13 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                 latent_model_input = torch.cat([latents] * 3) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                print("latent_model_input", latent_model_input.shape)
-                print("prompt_embeds", prompt_embeds.shape)
-                print("prompt_attention_mask", prompt_attention_mask.shape)
-                print("prompt_embeds_2", prompt_embeds_2.shape)
-                print("prompt_attention_mask_2", prompt_attention_mask_2.shape)
-                print("add_time_ids", add_time_ids.shape)
-                print("style", style.shape)
+                # print("latent_model_input", latent_model_input.shape)
+                # print("prompt_embeds", prompt_embeds.shape)
+                # print("prompt_attention_mask", prompt_attention_mask.shape)
+                # print("prompt_embeds_2", prompt_embeds_2.shape)
+                # print("prompt_attention_mask_2", prompt_attention_mask_2.shape)
+                # print("add_time_ids", add_time_ids.shape)
+                # print("style", style.shape)
                 noise_pred = self.transformer(
                     latent_model_input,
                     torch.tensor([t] * latent_model_input.shape[0], device=device).to(dtype=latent_model_input.dtype),
@@ -685,7 +692,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                     return_dict=False,
                 )[0]
 
-                # noise_pred, _ = noise_pred.chunk(2, dim=1)
+                noise_pred, _ = noise_pred.chunk(2, dim=1)
 
                 # perform guidance
                 # if do_classifier_free_guidance:
@@ -858,12 +865,20 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                     noise_pred = noise_pred_uncond + noise_guidance
                     # compute the previous noisy sample x_t -> x_t-1
 
+                    # perform guidance
+                    # if do_classifier_free_guidance:
+                    #     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    #     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
+                    if do_classifier_free_guidance and guidance_rescale > 0.0:
+                        # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                        noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
+
+                    noise_pred = noise_pred_uncond + noise_guidance
                 # print("noise_pred", noise_pred.shape)
                 # print("latents", latents.shape)
                 # print("t", t)
                 # todo
-                noise_pred = noise_pred[:,:4,:,:]
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
                 if callback_on_step_end is not None:
@@ -884,9 +899,19 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                     progress_bar.update()
 
         # Post-processing
-        image = self.decode_latents(latents)
-        image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
-        image = self.image_processor.postprocess(image, output_type=output_type)
+        if not output_type == "latent":
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+        else:
+            image = latents
+            has_nsfw_concept = None
+
+        if has_nsfw_concept is None:
+            do_denormalize = [True] * image.shape[0]
+        else:
+            do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
         # Offload all models
         self.maybe_free_model_hooks()
