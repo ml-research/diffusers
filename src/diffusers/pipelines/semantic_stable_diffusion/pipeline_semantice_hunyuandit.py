@@ -66,6 +66,7 @@ SUPPORTED_SHAPE = [
     (768, 1280),  # 9:16
 ]
 
+
 def map_to_standard_shapes(target_width, target_height):
     target_ratio = target_width / target_height
     closest_ratio_idx = np.argmin(np.abs(STANDARD_RATIO - target_ratio))
@@ -93,6 +94,7 @@ def get_resize_crop_region_for_grid(src, tgt_size):
 
     return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
 
+
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.rescale_noise_cfg
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     """
@@ -106,6 +108,7 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
     noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
     return noise_cfg
+
 
 class HunyuanDiTSEGAPipeline(DiffusionPipeline):
     r"""
@@ -180,43 +183,26 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             text_encoder_2=text_encoder_2,
         )
 
+        if safety_checker is None and requires_safety_checker:
+            logger.warning(
+                f"You have disabled the safety checker for {self.__class__} by passing `safety_checker=None`. Ensure"
+                " that you abide to the conditions of the Stable Diffusion license and do not expose unfiltered"
+                " results in services or applications open to the public. Both the diffusers team and Hugging Face"
+                " strongly recommend to keep the safety filter enabled in all public facing circumstances, disabling"
+                " it only for use-cases that involve analyzing network behavior or auditing its results. For more"
+                " information, please have a look at https://github.com/huggingface/diffusers/pull/254 ."
+            )
+
+        if safety_checker is not None and feature_extractor is None:
+            raise ValueError(
+                "Make sure to define a feature extractor when loading {self.__class__} if you want to use the safety"
+                " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
+            )
+
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
         self.default_sample_size = self.transformer.config.sample_size
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
-    def prepare_extra_step_kwargs(self, generator, eta):
-        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
-        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
-        # and should be between [0, 1]
-
-        accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
-        extra_step_kwargs = {}
-        if accepts_eta:
-            extra_step_kwargs["eta"] = eta
-
-        # check if the scheduler accepts generator
-        accepts_generator = "generator" in set(inspect.signature(self.scheduler.step).parameters.keys())
-        if accepts_generator:
-            extra_step_kwargs["generator"] = generator
-        return extra_step_kwargs
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.run_safety_checker
-    def run_safety_checker(self, image, device, dtype):
-        if self.safety_checker is None:
-            has_nsfw_concept = None
-        else:
-            if torch.is_tensor(image):
-                feature_extractor_input = self.image_processor.postprocess(image, output_type="pil")
-            else:
-                feature_extractor_input = self.image_processor.numpy_to_pil(image)
-            safety_checker_input = self.feature_extractor(feature_extractor_input, return_tensors="pt").to(device)
-            image, has_nsfw_concept = self.safety_checker(
-                images=image, clip_input=safety_checker_input.pixel_values.to(dtype)
-            )
-        return image, has_nsfw_concept
 
     def encode_prompt(
             self,
@@ -242,12 +228,20 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         tokenizer = tokenizers[text_encoder_index]
         text_encoder = text_encoders[text_encoder_index]
 
-        if text_encoder_index == 0:
-            max_length = 77
+        if max_sequence_length is None:
+            if text_encoder_index == 0:
+                max_length = 77
+            if text_encoder_index == 1:
+                max_length = 256
         else:
-            max_length = 256
+            max_length = max_sequence_length
 
-        batch_size = 1 if isinstance(prompt, str) else len(prompt)
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
 
         if prompt is not None:
             text_inputs = tokenizer(
@@ -400,6 +394,115 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
 
         return prompt_embeds, negative_prompt_embeds, editing_prompt_embeds, prompt_attention_mask, negative_prompt_attention_mask, editing_prompt_attention_mask
 
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
+    def prepare_extra_step_kwargs(self, generator, eta):
+        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
+        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
+        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # and should be between [0, 1]
+
+        accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        extra_step_kwargs = {}
+        if accepts_eta:
+            extra_step_kwargs["eta"] = eta
+
+        # check if the scheduler accepts generator
+        accepts_generator = "generator" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        if accepts_generator:
+            extra_step_kwargs["generator"] = generator
+        return extra_step_kwargs
+
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.run_safety_checker
+    def run_safety_checker(self, image, device, dtype):
+        if self.safety_checker is None:
+            has_nsfw_concept = None
+        else:
+            if torch.is_tensor(image):
+                feature_extractor_input = self.image_processor.postprocess(image, output_type="pil")
+            else:
+                feature_extractor_input = self.image_processor.numpy_to_pil(image)
+            safety_checker_input = self.feature_extractor(feature_extractor_input, return_tensors="pt").to(device)
+            image, has_nsfw_concept = self.safety_checker(
+                images=image, clip_input=safety_checker_input.pixel_values.to(dtype)
+            )
+        return image, has_nsfw_concept
+
+    def check_inputs(
+        self,
+        prompt,
+        height,
+        width,
+        negative_prompt=None,
+        prompt_embeds=None,
+        negative_prompt_embeds=None,
+        prompt_attention_mask=None,
+        negative_prompt_attention_mask=None,
+        prompt_embeds_2=None,
+        negative_prompt_embeds_2=None,
+        prompt_attention_mask_2=None,
+        negative_prompt_attention_mask_2=None,
+        callback_on_step_end_tensor_inputs=None,
+    ):
+        if height % 8 != 0 or width % 8 != 0:
+            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+
+        if callback_on_step_end_tensor_inputs is not None and not all(
+            k in self._callback_tensor_inputs for k in callback_on_step_end_tensor_inputs
+        ):
+            raise ValueError(
+                f"`callback_on_step_end_tensor_inputs` has to be in {self._callback_tensor_inputs}, but found {[k for k in callback_on_step_end_tensor_inputs if k not in self._callback_tensor_inputs]}"
+            )
+
+        if prompt is not None and prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
+                " only forward one of the two."
+            )
+        elif prompt is None and prompt_embeds is None:
+            raise ValueError(
+                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
+            )
+        elif prompt is None and prompt_embeds_2 is None:
+            raise ValueError(
+                "Provide either `prompt` or `prompt_embeds_2`. Cannot leave both `prompt` and `prompt_embeds_2` undefined."
+            )
+        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
+            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+
+        if prompt_embeds is not None and prompt_attention_mask is None:
+            raise ValueError("Must provide `prompt_attention_mask` when specifying `prompt_embeds`.")
+
+        if prompt_embeds_2 is not None and prompt_attention_mask_2 is None:
+            raise ValueError("Must provide `prompt_attention_mask_2` when specifying `prompt_embeds_2`.")
+
+        if negative_prompt is not None and negative_prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
+                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
+            )
+
+        if negative_prompt_embeds is not None and negative_prompt_attention_mask is None:
+            raise ValueError("Must provide `negative_prompt_attention_mask` when specifying `negative_prompt_embeds`.")
+
+        if negative_prompt_embeds_2 is not None and negative_prompt_attention_mask_2 is None:
+            raise ValueError(
+                "Must provide `negative_prompt_attention_mask_2` when specifying `negative_prompt_embeds_2`."
+            )
+        if prompt_embeds is not None and negative_prompt_embeds is not None:
+            if prompt_embeds.shape != negative_prompt_embeds.shape:
+                raise ValueError(
+                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
+                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
+                    f" {negative_prompt_embeds.shape}."
+                )
+        if prompt_embeds_2 is not None and negative_prompt_embeds_2 is not None:
+            if prompt_embeds_2.shape != negative_prompt_embeds_2.shape:
+                raise ValueError(
+                    "`prompt_embeds_2` and `negative_prompt_embeds_2` must have the same shape when passed directly, but"
+                    f" got: `prompt_embeds_2` {prompt_embeds_2.shape} != `negative_prompt_embeds_2`"
+                    f" {negative_prompt_embeds_2.shape}."
+                )
+
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (
             batch_size,
@@ -514,25 +617,34 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         """
 
         # 1. Check inputs. Raise error if not correct
-        # self.check_inputs(
-        #     prompt,
-        #     height,
-        #     width,
-        #     negative_prompt,
-        #     prompt_embeds,
-        #     negative_prompt_embeds,
-        #     prompt_attention_mask,
-        #     negative_prompt_attention_mask,
-        #     prompt_embeds_2,
-        #     negative_prompt_embeds_2,
-        #     prompt_attention_mask_2,
-        #     negative_prompt_attention_mask_2,
-        #     callback_on_step_end_tensor_inputs,
-        # )
+        self.check_inputs(
+            prompt,
+            height,
+            width,
+            negative_prompt,
+            prompt_embeds,
+            negative_prompt_embeds,
+            prompt_attention_mask,
+            negative_prompt_attention_mask,
+            prompt_embeds_2,
+            negative_prompt_embeds_2,
+            prompt_attention_mask_2,
+            negative_prompt_attention_mask_2,
+            callback_on_step_end_tensor_inputs,
+        )
+        self._guidance_scale = guidance_scale
+        self._guidance_rescale = guidance_rescale
+        self._interrupt = False
 
         # 2. Define call parameters
-        batch_size = 1 if isinstance(prompt, str) else len(prompt)
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
 
+        device = self._execution_device
         if editing_prompt:
             enable_edit_guidance = True
             if isinstance(editing_prompt, str):
@@ -544,11 +656,10 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         else:
             enabled_editing_prompts = 0
             enable_edit_guidance = False
-        print(enabled_editing_prompts)
         device = self._execution_device
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        # Encode prompt and editing prompt
+        # 3. Encode prompt and editing prompt
         (prompt_embeds, negative_prompt_embeds, editing_prompt_embeds,
          prompt_attention_mask, negative_prompt_attention_mask, editing_prompt_attention_mask
          ) = self.encode_prompt(
@@ -565,6 +676,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             prompt_attention_mask=prompt_attention_mask,
             negative_prompt_attention_mask=negative_prompt_attention_mask,
             editing_prompt_attention_mask=None,
+            max_sequence_length=77,
             text_encoder_index=0,
         )
         (prompt_embeds_2, negative_prompt_embeds_2, editing_prompt_embeds_2,
@@ -583,6 +695,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             prompt_attention_mask=prompt_attention_mask_2,
             negative_prompt_attention_mask=negative_prompt_attention_mask_2,
             editing_prompt_attention_mask=None,
+            max_sequence_length=256,
             text_encoder_index=1,
         )
 
@@ -635,20 +748,10 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
 
         if do_classifier_free_guidance:
             if enable_edit_guidance:
-                for x in [negative_prompt_embeds, prompt_embeds, editing_prompt_embeds]:
-                    print("prompt 1",  x.shape)
                 prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, editing_prompt_embeds])
-                for x in [negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask]:
-                    print("attention_mask 1",  x.shape)
-                prompt_attention_mask = torch.cat(
-                    [negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask])
-                for x in [negative_prompt_embeds_2, prompt_embeds_2, editing_prompt_embeds_2]:
-                    print("prompt 2",  x.shape)
+                prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask])
                 prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2, editing_prompt_embeds_2])
-                for x in [negative_prompt_attention_mask_2, prompt_attention_mask_2, editing_prompt_attention_mask_2]:
-                    print("attention_mask 2",  x.shape)
-                prompt_attention_mask_2 = torch.cat(
-                    [negative_prompt_attention_mask_2, prompt_attention_mask_2, editing_prompt_attention_mask_2])
+                prompt_attention_mask_2 = torch.cat([negative_prompt_attention_mask_2, prompt_attention_mask_2, editing_prompt_attention_mask_2])
                 add_time_ids = torch.cat([add_time_ids] * (2+enabled_editing_prompts), dim=0)  # Updated to 3 because we added editing_prompt
                 style = torch.cat([style] * (2+enabled_editing_prompts), dim=0)  # Updated to 3 because we added editing_prompt
             else:
@@ -661,7 +764,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
 
                 prompt_attention_mask_2 = torch.cat(
                     [negative_prompt_attention_mask_2, prompt_attention_mask_2,])
-                add_time_ids = torch.cat([add_time_ids] * 2, dim=0)  # Updated to 3 because we added editing_prompt
+                add_time_ids = torch.cat([add_time_ids] * 2, dim=0)
                 style = torch.cat([style] * 2, dim=0)
 
         prompt_embeds = prompt_embeds.to(device=device)
@@ -672,31 +775,26 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             batch_size * num_images_per_prompt, 1
         )
         style = style.to(device=device).repeat(batch_size * num_images_per_prompt)
-        print("prompt_embeds", prompt_embeds.shape)
-        print("prompt_attention_mask", prompt_attention_mask.shape)
-        print("prompt_embeds_2", prompt_embeds_2.shape)
-        print("resize prompt_embeds_2", prompt_embeds_2.shape)
-        print("prompt_attention_mask_2", prompt_attention_mask_2.shape)
 
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                if self.interrupt:
+                    continue
 
                 latent_model_input = torch.cat([latents] * (2 +enabled_editing_prompts)) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                print("latent_model_input", latent_model_input.shape)
-                print("prompt_embeds", prompt_embeds.shape)
-                print("prompt_attention_mask", prompt_attention_mask.shape)
-                print("prompt_embeds_2", prompt_embeds_2.shape)
-                print("prompt_attention_mask_2", prompt_attention_mask_2.shape)
-                print("add_time_ids", add_time_ids.shape)
-                print("style", style.shape)
+                # expand scalar t to 1-D tensor to match the 1st dim of latent_model_input
+                t_expand = torch.tensor([t] * latent_model_input.shape[0], device=device).to(
+                    dtype=latent_model_input.dtype
+                )
+
                 noise_pred = self.transformer(
                     latent_model_input,
-                    torch.tensor([t] * latent_model_input.shape[0], device=device).to(dtype=latent_model_input.dtype),
+                    t_expand,
                     encoder_hidden_states=prompt_embeds,
                     text_embedding_mask=prompt_attention_mask,
                     encoder_hidden_states_t5=prompt_embeds_2,
@@ -710,12 +808,6 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                 noise_pred, _ = noise_pred.chunk(2, dim=1)
 
                 # perform guidance
-                # if do_classifier_free_guidance:
-                #     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2 + enabled_editing_prompts)
-                #     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-                #
-                #     if guidance_rescale > 0.0:
-                #         noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale)
                 if do_classifier_free_guidance:
                     noise_pred_out = noise_pred.chunk(2 + enabled_editing_prompts)  # [b,4, 64, 64]
                     noise_pred_uncond, noise_pred_text = noise_pred_out[0], noise_pred_out[1]
@@ -890,11 +982,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                         noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
 
                     noise_pred = noise_pred_uncond + noise_guidance
-                # print("noise_pred", noise_pred.shape)
-                # print("latents", latents.shape)
-                # print("t", t)
-                # todo
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
