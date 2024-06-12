@@ -221,7 +221,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
     def encode_prompt(
             self,
             prompt: str,
-            editing_prompt: Union[str, list],
+            editing_prompt: Optional[Union[str, list]],
             device: torch.device,
             dtype: torch.dtype,
             num_images_per_prompt: int = 1,
@@ -307,11 +307,13 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                 raise ValueError(
                     f"`editing_prompt` has to be of type `str` or `list` but is {type(editing_prompt)}"
                 )
+
         else:
             editing_prompt_embeds = None
 
-        editing_prompt_embeds = editing_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        editing_prompt_embeds = editing_prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        if editing_prompt_embeds is not None:
+            editing_prompt_embeds = editing_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            editing_prompt_embeds = editing_prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
 
         if prompt_embeds is None:
             text_inputs = tokenizer(
@@ -542,7 +544,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         else:
             enabled_editing_prompts = 0
             enable_edit_guidance = False
-
+        print(enabled_editing_prompts)
         device = self._execution_device
         do_classifier_free_guidance = guidance_scale > 1.0
 
@@ -632,22 +634,35 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype)
 
         if do_classifier_free_guidance:
-            for x in [negative_prompt_embeds, prompt_embeds, editing_prompt_embeds]:
-                print("prompt 1",  x.shape)
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, editing_prompt_embeds])
-            for x in [negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask]:
-                print("attention_mask 1",  x.shape)
-            prompt_attention_mask = torch.cat(
-                [negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask])
-            for x in [negative_prompt_embeds_2, prompt_embeds_2, editing_prompt_embeds_2]:
-                print("prompt 2",  x.shape)
-            prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2, editing_prompt_embeds_2])
-            for x in [negative_prompt_attention_mask_2, prompt_attention_mask_2, editing_prompt_attention_mask_2]:
-                print("attention_mask 2",  x.shape)
-            prompt_attention_mask_2 = torch.cat(
-                [negative_prompt_attention_mask_2, prompt_attention_mask_2, editing_prompt_attention_mask_2])
-            add_time_ids = torch.cat([add_time_ids] * 3, dim=0)  # Updated to 3 because we added editing_prompt
-            style = torch.cat([style] * 3, dim=0)  # Updated to 3 because we added editing_prompt
+            if enable_edit_guidance:
+                for x in [negative_prompt_embeds, prompt_embeds, editing_prompt_embeds]:
+                    print("prompt 1",  x.shape)
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, editing_prompt_embeds])
+                for x in [negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask]:
+                    print("attention_mask 1",  x.shape)
+                prompt_attention_mask = torch.cat(
+                    [negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask])
+                for x in [negative_prompt_embeds_2, prompt_embeds_2, editing_prompt_embeds_2]:
+                    print("prompt 2",  x.shape)
+                prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2, editing_prompt_embeds_2])
+                for x in [negative_prompt_attention_mask_2, prompt_attention_mask_2, editing_prompt_attention_mask_2]:
+                    print("attention_mask 2",  x.shape)
+                prompt_attention_mask_2 = torch.cat(
+                    [negative_prompt_attention_mask_2, prompt_attention_mask_2, editing_prompt_attention_mask_2])
+                add_time_ids = torch.cat([add_time_ids] * (2+enabled_editing_prompts), dim=0)  # Updated to 3 because we added editing_prompt
+                style = torch.cat([style] * (2+enabled_editing_prompts), dim=0)  # Updated to 3 because we added editing_prompt
+            else:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+
+                prompt_attention_mask = torch.cat(
+                    [negative_prompt_attention_mask, prompt_attention_mask, ])
+
+                prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2, ])
+
+                prompt_attention_mask_2 = torch.cat(
+                    [negative_prompt_attention_mask_2, prompt_attention_mask_2,])
+                add_time_ids = torch.cat([add_time_ids] * 2, dim=0)  # Updated to 3 because we added editing_prompt
+                style = torch.cat([style] * 2, dim=0)
 
         prompt_embeds = prompt_embeds.to(device=device)
         prompt_attention_mask = prompt_attention_mask.to(device=device)
@@ -669,16 +684,16 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
 
-                latent_model_input = torch.cat([latents] * 3) if do_classifier_free_guidance else latents
+                latent_model_input = torch.cat([latents] * (2 +enabled_editing_prompts)) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # print("latent_model_input", latent_model_input.shape)
-                # print("prompt_embeds", prompt_embeds.shape)
-                # print("prompt_attention_mask", prompt_attention_mask.shape)
-                # print("prompt_embeds_2", prompt_embeds_2.shape)
-                # print("prompt_attention_mask_2", prompt_attention_mask_2.shape)
-                # print("add_time_ids", add_time_ids.shape)
-                # print("style", style.shape)
+                print("latent_model_input", latent_model_input.shape)
+                print("prompt_embeds", prompt_embeds.shape)
+                print("prompt_attention_mask", prompt_attention_mask.shape)
+                print("prompt_embeds_2", prompt_embeds_2.shape)
+                print("prompt_attention_mask_2", prompt_attention_mask_2.shape)
+                print("add_time_ids", add_time_ids.shape)
+                print("style", style.shape)
                 noise_pred = self.transformer(
                     latent_model_input,
                     torch.tensor([t] * latent_model_input.shape[0], device=device).to(dtype=latent_model_input.dtype),
