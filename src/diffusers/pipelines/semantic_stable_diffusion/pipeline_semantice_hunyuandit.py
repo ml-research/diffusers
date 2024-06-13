@@ -281,22 +281,33 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             if isinstance(editing_prompt, str):
                 editing_prompt = [editing_prompt]
             if isinstance(editing_prompt, list):
-                editing_prompt_inputs = tokenizer(
-                    editing_prompt,
-                    padding="max_length",
-                    max_length=max_length,
-                    truncation=True,
-                    return_attention_mask=True,
-                    return_tensors="pt",
-                )
+                editing_prompt_embeds = []
+                editing_prompt_attention_masks = []
 
-                editing_prompt_input_ids = editing_prompt_inputs.input_ids
-                editing_prompt_attention_mask = editing_prompt_inputs.attention_mask.to(device)
-                editing_prompt_embeds = text_encoder(
-                    editing_prompt_input_ids.to(device),
-                    attention_mask=editing_prompt_attention_mask,
-                )[0]
-                editing_prompt_embeds = editing_prompt_embeds.to(dtype=dtype, device=device)
+                for single_prompt in editing_prompt:
+                    single_prompt_input = tokenizer(
+                        single_prompt,
+                        padding="max_length",
+                        max_length=max_length,
+                        truncation=True,
+                        return_attention_mask=True,
+                        return_tensors="pt",
+                    )
+
+                    single_prompt_input_ids = single_prompt_input.input_ids
+                    single_prompt_attention_mask = single_prompt_input.attention_mask.to(device)
+
+                    single_prompt_embed = text_encoder(
+                        single_prompt_input_ids.to(device),
+                        attention_mask=single_prompt_attention_mask,
+                    )[0]
+
+                    editing_prompt_embeds.append(single_prompt_embed.to(dtype=dtype, device=device))
+                    editing_prompt_attention_masks.append(single_prompt_attention_mask)
+
+                # Convert lists to tensors
+                editing_prompt_embeds = torch.cat(editing_prompt_embeds)
+                editing_prompt_attention_mask = torch.cat(editing_prompt_attention_masks)
             else:
                 raise ValueError(
                     f"`editing_prompt` has to be of type `str` or `list` but is {type(editing_prompt)}"
@@ -656,6 +667,7 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
         else:
             enabled_editing_prompts = 0
             enable_edit_guidance = False
+        
         device = self._execution_device
         do_classifier_free_guidance = guidance_scale > 1.0
 
@@ -748,6 +760,10 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
 
         if do_classifier_free_guidance:
             if enable_edit_guidance:
+                editing_prompt_embeds = editing_prompt_embeds.reshape([-1, *tuple(prompt_embeds.shape[1:])])
+                editing_prompt_embeds_2 = editing_prompt_embeds_2.reshape([-1, *tuple(prompt_embeds_2.shape[1:])])
+                editing_prompt_attention_mask = editing_prompt_attention_mask.reshape([-1, *tuple(prompt_attention_mask.shape[1:])])
+                editing_prompt_attention_mask_2 = editing_prompt_attention_mask_2.reshape([-1, *tuple(prompt_attention_mask_2.shape[1:])])
                 prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds, editing_prompt_embeds])
                 prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask, editing_prompt_attention_mask])
                 prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2, editing_prompt_embeds_2])
@@ -756,14 +772,9 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                 style = torch.cat([style] * (2+enabled_editing_prompts), dim=0)  # Updated to 3 because we added editing_prompt
             else:
                 prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-
-                prompt_attention_mask = torch.cat(
-                    [negative_prompt_attention_mask, prompt_attention_mask, ])
-
+                prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask, ])
                 prompt_embeds_2 = torch.cat([negative_prompt_embeds_2, prompt_embeds_2, ])
-
-                prompt_attention_mask_2 = torch.cat(
-                    [negative_prompt_attention_mask_2, prompt_attention_mask_2,])
+                prompt_attention_mask_2 = torch.cat([negative_prompt_attention_mask_2, prompt_attention_mask_2,])
                 add_time_ids = torch.cat([add_time_ids] * 2, dim=0)
                 style = torch.cat([style] * 2, dim=0)
 
