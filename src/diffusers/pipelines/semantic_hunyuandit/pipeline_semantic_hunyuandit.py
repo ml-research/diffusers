@@ -28,10 +28,11 @@ EXAMPLE_DOC_STRING = """
         >>> pipe = HunyuanDiTSEGAPipeline.from_pretrained(
         ...     "Tencent-Hunyuan/HunyuanDiT-Diffusers", torch_dtype=torch.float16
         ... )
-        >>> pipe.to("cuda")
+        >>> pipe = pipe.to("cuda")
 
-        >>> prompt = "一个宇航员在骑马"
-        >>> editing_prompt = ["微笑", "眼镜", "卷发", "胡子"]
+        >>> # Example: Cityscape
+        >>> prompt = "A cityscape"
+        >>> editing_prompt = ["crowed", "trees", "birds"]
         >>> image = pipe(prompt, editing_prompt=editing_prompt).images[0]
         ```
 """
@@ -67,6 +68,7 @@ SUPPORTED_SHAPE = [
 ]
 
 
+# Copied from diffusers.pipelines.hunyuandits.pipeline_hunyuandits.map_to_standard_shapes
 def map_to_standard_shapes(target_width, target_height):
     target_ratio = target_width / target_height
     closest_ratio_idx = np.argmin(np.abs(STANDARD_RATIO - target_ratio))
@@ -75,6 +77,7 @@ def map_to_standard_shapes(target_width, target_height):
     return width, height
 
 
+# Copied from diffusers.pipelines.hunyuandits.pipeline_hunyuandits.get_resize_crop_region_for_grid
 def get_resize_crop_region_for_grid(src, tgt_size):
     th = tw = tgt_size
     h, w = src
@@ -95,7 +98,7 @@ def get_resize_crop_region_for_grid(src, tgt_size):
     return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
 
 
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.rescale_noise_cfg
+# Copied from diffusers.pipelines.hunyuandits.pipeline_hunyuandits.rescale_noise_cfg
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     """
     Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
@@ -110,31 +113,32 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     return noise_cfg
 
 
+# based on diffusers.pipelines.hunyuandits.pipeline_hunyuandits.HunyuanDiTPipeline
 class HunyuanDiTSEGAPipeline(DiffusionPipeline):
     r"""
-    Pipeline for SEGA latent editing with HunyuanDiT.
+    Pipeline for text-to-image generation using HunyuanDiT with SEGA (Semantic Guidance) latent editing.
 
     This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
-    library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.).
+    library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
 
     Args:
         vae ([`AutoencoderKL`]):
             Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
-        text_encoder (Optional[`~transformers.BertModel`, `~transformers.CLIPTextModel`]):
+        text_encoder ([`~transformers.BertModel`]):
             Frozen text-encoder. HunyuanDiT uses a fine-tuned [bilingual CLIP].
-        tokenizer (Optional[`~transformers.BertTokenizer`, `~transformers.CLIPTokenizer`]):
-            A `BertTokenizer` or `CLIPTokenizer` to tokenize text.
+        tokenizer ([`~transformers.BertTokenizer`]):
+            A `BertTokenizer` to tokenize text.
         transformer ([`HunyuanDiT2DModel`]):
             The HunyuanDiT model designed by Tencent Hunyuan.
-        text_encoder_2 (`T5EncoderModel`):
+        text_encoder_2 ([`~transformers.T5EncoderModel`]):
             The mT5 embedder. Specifically, it is 't5-v1_1-xxl'.
-        tokenizer_2 (`MT5Tokenizer`):
+        tokenizer_2 ([`~transformers.MT5Tokenizer`]):
             The tokenizer for the mT5 embedder.
         scheduler ([`DDPMScheduler`]):
             A scheduler to be used in combination with HunyuanDiT to denoise the encoded image latents.
         safety_checker ([`StableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offensive or harmful.
-        feature_extractor ([`CLIPImageProcessor`]):
+        feature_extractor ([`~transformers.CLIPImageProcessor`]):
             A `CLIPImageProcessor` to extract features from generated images for the safety checker.
     """
 
@@ -208,19 +212,19 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             self,
             prompt: str,
             editing_prompt: Optional[Union[str, list]],
-            device: torch.device,
-            dtype: torch.dtype,
+            device: torch.device = None,
+            dtype: torch.dtype = None,
             num_images_per_prompt: int = 1,
             text_encoder_index: int = 0,
             max_sequence_length: Optional[int] = None,
             do_classifier_free_guidance: bool = True,
             negative_prompt: Optional[torch.Tensor] = None,
             prompt_embeds: Optional[torch.Tensor] = None,
-            negative_prompt_embeds: Optional[torch.Tensor] = None,
             editing_prompt_embeds: Optional[torch.Tensor] = None,
+            negative_prompt_embeds: Optional[torch.Tensor] = None,
             prompt_attention_mask: Optional[torch.Tensor] = None,
-            negative_prompt_attention_mask: Optional[torch.Tensor] = None,
             editing_prompt_attention_mask: Optional[torch.Tensor] = None,
+            negative_prompt_attention_mask: Optional[torch.Tensor] = None,
     ):
         tokenizers = [self.tokenizer, self.tokenizer_2]
         text_encoders = [self.text_encoder, self.text_encoder_2]
@@ -549,12 +553,16 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
     def __call__(
             self,
             prompt: Union[str, List[str]],
-            height: int = 512,
-            width: int = 512,
-            num_inference_steps: int = 50,
-            prompt_embeds: Optional[torch.Tensor] = None,
-            guidance_scale: float = 7.5,
+            height: Optional[int] = None,
+            width: Optional[int] = None,
+            num_inference_steps: Optional[int] = 50,
+            guidance_scale: Optional[float] = 7.0,
             negative_prompt: Optional[Union[str, List[str]]] = None,
+            num_images_per_prompt: Optional[int] = 1,
+            eta: Optional[float] = 0.0,
+            generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+            latents: Optional[torch.Tensor] = None,
+            prompt_embeds: Optional[torch.Tensor] = None,
             prompt_embeds_2: Optional[torch.Tensor] = None,
             negative_prompt_embeds: Optional[torch.Tensor] = None,
             negative_prompt_embeds_2: Optional[torch.Tensor] = None,
@@ -562,10 +570,6 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             prompt_attention_mask_2: Optional[torch.Tensor] = None,
             negative_prompt_attention_mask: Optional[torch.Tensor] = None,
             negative_prompt_attention_mask_2: Optional[torch.Tensor] = None,
-            num_images_per_prompt: int = 1,
-            eta: float = 0.0,
-            generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-            latents: Optional[torch.Tensor] = None,
             output_type: Optional[str] = "pil",
             return_dict: bool = True,
             callback_on_step_end: Optional[
@@ -593,38 +597,117 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             sem_guidance: Optional[List[torch.Tensor]] = None,
     ):
         r"""
-        Encodes the prompt into text encoder hidden states.
+        Function invoked when calling the pipeline for generation with HunyuanDiT and SeGa.
 
         Args:
-            prompt (`str` or `List[str]`, *optional*):
-                prompt to be encoded
-            device: (`torch.device`):
-                torch device
-            dtype (`torch.dtype`):
-                torch dtype
-            num_images_per_prompt (`int`):
-                number of images that should be generated per prompt
-            do_classifier_free_guidance (`bool`):
-                whether to use classifier free guidance or not
+            prompt (`str` or `List[str]`):
+                The prompt or prompts to guide the image generation.
+            height (`int`, *optional*):
+                The height in pixels of the generated image. If not provided, it defaults to the model's default sample size.
+            width (`int`, *optional*):
+                The width in pixels of the generated image. If not provided, it defaults to the model's default sample size.
+            num_inference_steps (`int`, *optional*, defaults to 50):
+                The number of denoising steps. More denoising steps usually lead to a higher quality image at the
+                expense of slower inference.
+            guidance_scale (`float`, *optional*, defaults to 7.0):
+                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
+                `guidance_scale` is defined as `w` of equation 2. of [Imagen Paper](https://arxiv.org/pdf/2205.11487.pdf).
+                Guidance scale is enabled by setting `guidance_scale > 1`. Higher guidance scale encourages to generate
+                images that are closely linked to the text `prompt`, usually at the expense of lower image quality.
             negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts not to guide the image generation. If not defined, one has to pass
-                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
-                less than `1`).
-            prompt_embeds (`torch.Tensor`, *optional*):
+                The prompt or prompts not to guide the image generation. Ignored when not using guidance (i.e., ignored
+                if `guidance_scale` is less than `1`).
+            num_images_per_prompt (`int`, *optional*, defaults to 1):
+                The number of images to generate per prompt.
+            eta (`float`, *optional*, defaults to 0.0):
+                Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
+                [`schedulers.DDIMScheduler`], will be ignored for others.
+            generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+            latents (`torch.FloatTensor`, *optional*):
+                Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
+                generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
+                tensor will ge generated by sampling using the supplied random `generator`.
+            prompt_embeds (`torch.FloatTensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.Tensor`, *optional*):
+            prompt_embeds_2 (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings for the second text encoder (T5).
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
+            negative_prompt_embeds_2 (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings for the second text encoder (T5).
             prompt_attention_mask (`torch.Tensor`, *optional*):
-                Attention mask for the prompt. Required when `prompt_embeds` is passed directly.
+                Attention mask for the prompt.
+            prompt_attention_mask_2 (`torch.Tensor`, *optional*):
+                Attention mask for the prompt for the second text encoder (T5).
             negative_prompt_attention_mask (`torch.Tensor`, *optional*):
-                Attention mask for the negative prompt. Required when `negative_prompt_embeds` is passed directly.
-            max_sequence_length (`int`, *optional*): maximum sequence length to use for the prompt.
-            text_encoder_index (`int`, *optional*):
-                Index of the text encoder to use. `0` for clip and `1` for T5.
-        Examples:
+                Attention mask for the negative prompt.
+            negative_prompt_attention_mask_2 (`torch.Tensor`, *optional*):
+                Attention mask for the negative prompt for the second text encoder (T5).
+            output_type (`str`, *optional*, defaults to `"pil"`):
+                The output format of the generate image. Choose between
+                [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] instead of a
+                plain tuple.
+            callback_on_step_end (`Callable`, *optional*):
+                A function that will be called at the end of each denoising step during the inference. The function will be
+                called with the following arguments: `callback_on_step_end(self: DiffusionPipeline, step: int, timestep: int, callback_kwargs: Dict)`.
+            callback_on_step_end_tensor_inputs (`List[str]`, *optional*, defaults to `["latents"]`):
+                The list of tensor inputs for the `callback_on_step_end` function. The tensors specified in the list will
+                be passed as `callback_kwargs` argument.
+            guidance_rescale (`float`, *optional*, defaults to 0.0):
+                Guidance rescale factor proposed by [Common Diffusion Noise Schedules and Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf).
+                Guidance rescale factor should fix overexposure when using zero terminal SNR.
+            original_size (`Tuple[int, int]`, *optional*, defaults to (1024, 1024)):
+                Original size of the image before any resizing is done.
+            target_size (`Tuple[int, int]`, *optional*):
+                Target size for the image. If not specified, it will be set to (height, width).
+            crops_coords_top_left (`Tuple[int, int]`, *optional*, defaults to (0, 0)):
+                Coordinates for the top-left crop of the image.
+            use_resolution_binning (`bool`, *optional*, defaults to True):
+                Whether to use resolution binning. If True, the input resolution will be mapped to the closest
+                standard resolution.
+            editing_prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts to use for semantic guidance (editing).
+            editing_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings for editing prompt. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
+            editing_prompt_embeds_2 (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings for editing prompt for the second text encoder (T5).
+            editing_prompt_attention_mask (`torch.Tensor`, *optional*):
+                Attention mask for the editing prompt.
+            editing_prompt_attention_mask_2 (`torch.Tensor`, *optional*):
+                Attention mask for the editing prompt for the second text encoder (T5).
+            reverse_editing_direction (`bool`, *optional*, defaults to False):
+                Whether to reverse the editing direction. If True, the model will try to reduce the attributes specified
+                in the editing prompt.
+            edit_guidance_scale (`float`, *optional*, defaults to 5.0):
+                Guidance scale for semantic guidance. Higher values guide the image more towards the editing prompt.
+            edit_warmup_steps (`int`, *optional*, defaults to 10):
+                Number of warmup steps for semantic guidance.
+            edit_cooldown_steps (`int`, *optional*, defaults to None):
+                Number of cooldown steps for semantic guidance. If None, semantic guidance is applied until the end.
+            edit_threshold (`float`, *optional*, defaults to 0.9):
+                Threshold for semantic guidance.
+            edit_momentum_scale (`float`, *optional*, defaults to 0.1):
+                Scale of the momentum to be added to the semantic guidance at each diffusion step.
+            edit_mom_beta (`float`, *optional*, defaults to 0.4):
+                Momentum beta for semantic guidance.
+            edit_weights (`List[float]`, *optional*):
+                Weights for each editing prompt. If not provided, all editing prompts are weighted equally.
+            sem_guidance (`List[torch.FloatTensor]`, *optional*):
+                Pre-generated semantic guidance. If provided, it will be used instead of generating it from editing_prompt.
+
+        Returns:
+            [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] or `tuple`:
+            [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] if `return_dict` is True, otherwise a `tuple`.
+            When returning a tuple, the first element is a list with the generated images, and the second element is a
+            list of `bool`s denoting whether the corresponding generated image likely represents "not-safe-for-work"
+            (nsfw) content, according to the `safety_checker`.
         """
 
         # 1. Check inputs. Raise error if not correct
@@ -1034,4 +1117,3 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
-
