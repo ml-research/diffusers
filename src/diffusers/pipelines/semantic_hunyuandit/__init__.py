@@ -21,7 +21,7 @@ except OptionalDependencyNotAvailable:
 
     _dummy_objects.update(get_objects_from_module(dummy_torch_and_transformers_objects))
 else:
-    _import_structure["pipeline_semantice_hunyuandit"] = ["StableDiffusionPipelineOutput"]
+    _import_structure["pipeline_semantic_hunyuandit"] = ["SemanticHunyuanDiTPipeline"]
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     try:

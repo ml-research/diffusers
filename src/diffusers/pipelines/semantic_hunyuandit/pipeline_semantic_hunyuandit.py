@@ -114,7 +114,7 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
 
 
 # based on diffusers.pipelines.hunyuandits.pipeline_hunyuandits.HunyuanDiTPipeline
-class HunyuanDiTSEGAPipeline(DiffusionPipeline):
+class SemanticHunyuanDiTPipeline(DiffusionPipeline):
     r"""
     Pipeline for text-to-image generation using HunyuanDiT with SEGA (Semantic Guidance) latent editing.
 
@@ -701,6 +701,8 @@ class HunyuanDiTSEGAPipeline(DiffusionPipeline):
                 Weights for each editing prompt. If not provided, all editing prompts are weighted equally.
             sem_guidance (`List[torch.FloatTensor]`, *optional*):
                 Pre-generated semantic guidance. If provided, it will be used instead of generating it from editing_prompt.
+
+        Examples:
 
         Returns:
             [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] or `tuple`:
