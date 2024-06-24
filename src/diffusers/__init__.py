@@ -1,4 +1,4 @@
-__version__ = "0.29.0.dev0"
+__version__ = "0.30.0.dev0"
 
 from typing import TYPE_CHECKING
 
@@ -91,6 +91,9 @@ else:
             "MultiAdapter",
             "PixArtTransformer2DModel",
             "PriorTransformer",
+            "SD3ControlNetModel",
+            "SD3MultiControlNetModel",
+            "SD3Transformer2DModel",
             "StableCascadeUNet",
             "T2IAdapter",
             "T5FilmDecoder",
@@ -156,6 +159,7 @@ else:
             "EDMEulerScheduler",
             "EulerAncestralDiscreteScheduler",
             "EulerDiscreteScheduler",
+            "FlowMatchEulerDiscreteScheduler",
             "HeunDiscreteScheduler",
             "IPNDMScheduler",
             "KarrasVeScheduler",
@@ -277,6 +281,9 @@ else:
             "StableCascadeCombinedPipeline",
             "StableCascadeDecoderPipeline",
             "StableCascadePriorPipeline",
+            "StableDiffusion3ControlNetPipeline",
+            "StableDiffusion3Img2ImgPipeline",
+            "StableDiffusion3Pipeline",
             "StableDiffusionAdapterPipeline",
             "StableDiffusionAttendAndExcitePipeline",
             "StableDiffusionControlNetImg2ImgPipeline",
@@ -498,6 +505,9 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             MultiAdapter,
             PixArtTransformer2DModel,
             PriorTransformer,
+            SD3ControlNetModel,
+            SD3MultiControlNetModel,
+            SD3Transformer2DModel,
             T2IAdapter,
             T5FilmDecoder,
             Transformer2DModel,
@@ -560,6 +570,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             EDMEulerScheduler,
             EulerAncestralDiscreteScheduler,
             EulerDiscreteScheduler,
+            FlowMatchEulerDiscreteScheduler,
             HeunDiscreteScheduler,
             IPNDMScheduler,
             KarrasVeScheduler,
@@ -661,6 +672,9 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             StableCascadeCombinedPipeline,
             StableCascadeDecoderPipeline,
             StableCascadePriorPipeline,
+            StableDiffusion3ControlNetPipeline,
+            StableDiffusion3Img2ImgPipeline,
+            StableDiffusion3Pipeline,
             StableDiffusionAdapterPipeline,
             StableDiffusionAttendAndExcitePipeline,
             StableDiffusionControlNetImg2ImgPipeline,
