@@ -23,6 +23,7 @@ except OptionalDependencyNotAvailable:
 else:
     _import_structure["pipeline_output"] = ["SemanticStableDiffusionPipelineOutput"]
     _import_structure["pipeline_semantic_stable_diffusion"] = ["SemanticStableDiffusionPipeline"]
+    _import_structure["pipeline_semantic_stable_diffusion_3"] = ["SemanticStableDiffusion3Pipeline"]
 
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
@@ -34,6 +35,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from ...utils.dummy_torch_and_transformers_objects import *
     else:
         from .pipeline_semantic_stable_diffusion import SemanticStableDiffusionPipeline
+        from .pipeline_semantic_stable_diffusion_3 import SemanticStableDiffusion3Pipeline
 
 else:
     import sys
