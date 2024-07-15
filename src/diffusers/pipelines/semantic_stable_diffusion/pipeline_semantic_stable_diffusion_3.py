@@ -24,7 +24,8 @@ from transformers import (
 )
 
 from ...image_processor import VaeImageProcessor
-from ...loaders import FromSingleFileMixin, SD3LoraLoaderMixin
+from ...loaders.single_file import FromSingleFileMixin
+from ...loaders.lora import SD3LoraLoaderMixin
 from ...models.autoencoders import AutoencoderKL
 from ...models.transformers import SD3Transformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
