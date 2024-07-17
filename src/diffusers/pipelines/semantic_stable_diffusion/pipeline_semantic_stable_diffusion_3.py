@@ -918,7 +918,7 @@ class SemanticStableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, Fr
             latents,
         )
         edit_momentum = None
-
+        self.sem_guidance = None
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -1056,8 +1056,7 @@ class SemanticStableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, Fr
                             noise_guidance_edit_tmp = noise_guidance_edit_tmp
                             noise_guidance = noise_guidance + noise_guidance_edit_tmp
 
-
-
+                            self.sem_guidance[i] = noise_guidance_edit_tmp.detach().cpu()
                             del noise_guidance_edit_tmp
                             del concept_weights_tmp
                             concept_weights = concept_weights.to(device)
@@ -1077,6 +1076,7 @@ class SemanticStableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, Fr
 
                         if warmup_inds.shape[0] == len(noise_pred_edit_concepts):
                             noise_guidance = noise_guidance + noise_guidance_edit
+                            self.sem_guidance[i] = noise_guidance_edit.detach().cpu()
 
                     if sem_guidance is not None:
                         edit_guidance = sem_guidance[i].to(device)
