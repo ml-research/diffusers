@@ -950,6 +950,10 @@ class SemanticStableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, Fr
 
                     if edit_momentum is None:
                         edit_momentum = torch.zeros_like(noise_guidance)
+
+                    if self.sem_guidance is None:
+                        self.sem_guidance = torch.zeros((num_inference_steps + 1, *noise_pred_text.shape))
+
                     if enable_edit_guidance:
                         concept_weights = torch.zeros(
                             (len(noise_pred_edit_concepts), noise_guidance.shape[0]),
