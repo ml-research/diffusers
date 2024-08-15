@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from transformers import BertModel, BertTokenizer, CLIPImageProcessor, MT5Tokenizer, T5EncoderModel
 
-from ...pipelines.stable_diffusion import StableDiffusionPipelineOutput
+from ...pipelines.stable_diffusion.pipeline_output import StableDiffusionPipelineOutput
 from ...schedulers import DDPMScheduler
 from ...utils import is_torch_xla_available, logging, replace_example_docstring
 from ...utils.torch_utils import randn_tensor
