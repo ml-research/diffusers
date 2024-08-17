@@ -31,7 +31,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     except OptionalDependencyNotAvailable:
         from ...utils.dummy_torch_and_transformers_objects import *
     else:
-        from .pipeline_semantic_hunyuandit import StableDiffusionPipelineOutput
+        from .pipeline_semantic_hunyuandit import SemanticHunyuanDiTPipeline
 
 else:
     import sys
