@@ -69,7 +69,7 @@ EXAMPLE_DOC_STRING = """
         >>>     edit_threshold=[0.9, 0.9],
         >>>     edit_momentum_scale=0.3,
         >>>     edit_mom_beta=0.6,
-        >>>     generator=torch.Generator(device="cuda").manual_seed(seed),
+        >>>     generator=torch.Generator(device="cuda").manual_seed(123),
         >>> ).images[0]
         >>> image.save("semantic_flux.png")
         ```
