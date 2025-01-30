@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ if is_wandb_available():
     import wandb
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.32.0.dev0")
+check_min_version("0.33.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -2154,6 +2154,7 @@ def main(args):
 
                 # encode batch prompts when custom prompts are provided for each image -
                 if train_dataset.custom_instance_prompts:
+                    elems_to_repeat = 1
                     if freeze_text_encoder:
                         prompt_embeds, pooled_prompt_embeds, text_ids = compute_text_embeddings(
                             prompts, text_encoders, tokenizers
@@ -2168,17 +2169,21 @@ def main(args):
                             max_sequence_length=args.max_sequence_length,
                             add_special_tokens=add_special_tokens_t5,
                         )
+                else:
+                    elems_to_repeat = len(prompts)
 
                 if not freeze_text_encoder:
                     prompt_embeds, pooled_prompt_embeds, text_ids = encode_prompt(
                         text_encoders=[text_encoder_one, text_encoder_two],
                         tokenizers=[None, None],
-                        text_input_ids_list=[tokens_one, tokens_two],
+                        text_input_ids_list=[
+                            tokens_one.repeat(elems_to_repeat, 1),
+                            tokens_two.repeat(elems_to_repeat, 1),
+                        ],
                         max_sequence_length=args.max_sequence_length,
                         device=accelerator.device,
                         prompt=prompts,
                     )
-
                 # Convert images to latent space
                 if args.cache_latents:
                     model_input = latents_cache[step].sample()
@@ -2371,6 +2376,9 @@ def main(args):
                     epoch=epoch,
                     torch_dtype=weight_dtype,
                 )
+                images = None
+                del pipeline
+
                 if freeze_text_encoder:
                     del text_encoder_one, text_encoder_two
                     free_memory()
@@ -2448,6 +2456,8 @@ def main(args):
                 commit_message="End of training",
                 ignore_patterns=["step_*", "epoch_*"],
             )
+        images = None
+        del pipeline
 
     accelerator.end_training()
 
