@@ -1,6 +1,13 @@
 name: Fast GPU Tests on main
 
 on:
+  pull_request:
+    branches: main
+    paths:
+      - "src/diffusers/models/modeling_utils.py"
+      - "src/diffusers/models/model_loading_utils.py"
+      - "src/diffusers/pipelines/pipeline_utils.py"
+      - "src/diffusers/pipeline_loading_utils.py"
   workflow_dispatch:
   push:
     branches:
@@ -83,7 +90,7 @@ jobs:
           python utils/print_env.py
       - name: PyTorch CUDA checkpoint tests on Ubuntu
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.DIFFUSERS_HF_HUB_READ_TOKEN }}
           # https://pytorch.org/docs/stable/notes/randomness.html#avoiding-nondeterministic-algorithms
           CUBLAS_WORKSPACE_CONFIG: :16:8
         run: |
@@ -137,7 +144,7 @@ jobs:
 
     - name: Run PyTorch CUDA tests
       env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_TOKEN: ${{ secrets.DIFFUSERS_HF_HUB_READ_TOKEN }}
         # https://pytorch.org/docs/stable/notes/randomness.html#avoiding-nondeterministic-algorithms
         CUBLAS_WORKSPACE_CONFIG: :16:8
       run: |
@@ -160,11 +167,13 @@ jobs:
         path: reports
 
   flax_tpu_tests:
+    if: ${{ github.event_name != 'pull_request' }}
     name: Flax TPU Tests
-    runs-on: docker-tpu
+    runs-on:
+      group: gcp-ct5lp-hightpu-8t
     container:
       image: diffusers/diffusers-flax-tpu
-      options: --shm-size "16gb" --ipc host -v /mnt/cache/.cache/huggingface:/mnt/cache/ --privileged
+      options: --shm-size "16gb" --ipc host --privileged ${{ vars.V5_LITEPOD_8_ENV}} -v /mnt/hf_cache:/mnt/hf_cache 
     defaults:
       run:
         shell: bash
@@ -186,7 +195,7 @@ jobs:
 
     - name: Run Flax TPU tests
       env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_TOKEN: ${{ secrets.DIFFUSERS_HF_HUB_READ_TOKEN }}
       run: |
         python -m pytest -n 0 \
           -s -v -k "Flax" \
@@ -207,6 +216,7 @@ jobs:
         path: reports
 
   onnx_cuda_tests:
+    if: ${{ github.event_name != 'pull_request' }}
     name: ONNX CUDA Tests
     runs-on:
       group: aws-g4dn-2xlarge
@@ -234,7 +244,7 @@ jobs:
 
     - name: Run ONNXRuntime CUDA tests
       env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_TOKEN: ${{ secrets.DIFFUSERS_HF_HUB_READ_TOKEN }}
       run: |
         python -m pytest -n 1 --max-worker-restart=0 --dist=loadfile \
           -s -v -k "Onnx" \
@@ -255,6 +265,7 @@ jobs:
         path: reports
 
   run_torch_compile_tests:
+    if: ${{ github.event_name != 'pull_request' }}
     name: PyTorch Compile CUDA tests
 
     runs-on:
@@ -282,7 +293,7 @@ jobs:
         python utils/print_env.py
     - name: Run example tests on GPU
       env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_TOKEN: ${{ secrets.DIFFUSERS_HF_HUB_READ_TOKEN }}
         RUN_COMPILE: yes
       run: |
         python -m pytest -n 1 --max-worker-restart=0 --dist=loadfile -s -v -k "compile" --make-reports=tests_torch_compile_cuda tests/
@@ -298,6 +309,7 @@ jobs:
         path: reports
 
   run_xformers_tests:
+    if: ${{ github.event_name != 'pull_request' }}
     name: PyTorch xformers CUDA tests
 
     runs-on:
@@ -325,7 +337,7 @@ jobs:
         python utils/print_env.py
     - name: Run example tests on GPU
       env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_TOKEN: ${{ secrets.DIFFUSERS_HF_HUB_READ_TOKEN }}
       run: |
         python -m pytest -n 1 --max-worker-restart=0 --dist=loadfile -s -v -k "xformers" --make-reports=tests_torch_xformers_cuda tests/
     - name: Failure short reports
@@ -348,7 +360,6 @@ jobs:
     container:
       image: diffusers/diffusers-pytorch-cuda
       options: --gpus 0 --shm-size "16gb" --ipc host
-
     steps:
     - name: Checkout diffusers
       uses: actions/checkout@v3
@@ -358,7 +369,6 @@ jobs:
     - name: NVIDIA-SMI
       run: |
         nvidia-smi
-
     - name: Install dependencies
       run: |
         python -m venv /opt/venv && export PATH="/opt/venv/bin:$PATH"
@@ -371,7 +381,7 @@ jobs:
 
     - name: Run example tests on GPU
       env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_TOKEN: ${{ secrets.DIFFUSERS_HF_HUB_READ_TOKEN }}
       run: |
         python -m venv /opt/venv && export PATH="/opt/venv/bin:$PATH"
         python -m uv pip install timm
