@@ -367,19 +367,19 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             last_timestep = ((self.config.num_train_timesteps - clipped_idx).numpy()).item()
 
             # "linspace", "leading", "trailing" corresponds to annotation of Table 2. of https://arxiv.org/abs/2305.08891
-            if self.config.timestep_spacing == "linspace":
+            if self.config.timestep_spacing == "linspace":                
                 timesteps = (
-                    np.linspace(0, last_timestep - 1, num_inference_steps + 1)
-                    .round()[::-1][:-1]
+                    np.linspace(1, last_timestep - 1, num_inference_steps)
+                    .round()[::-1]
                     .copy()
                     .astype(np.int64)
                 )
             elif self.config.timestep_spacing == "leading":
-                step_ratio = last_timestep // (num_inference_steps + 1)
+                step_ratio = last_timestep // num_inference_steps
                 # creates integer timesteps by multiplying by ratio
                 # casting to int to avoid issues when num_inference_step is power of 3
                 timesteps = (
-                    (np.arange(0, num_inference_steps + 1) * step_ratio).round()[::-1][:-1].copy().astype(np.int64)
+                    (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].copy().astype(np.int64)
                 )
                 timesteps += self.config.steps_offset
             elif self.config.timestep_spacing == "trailing":
@@ -418,9 +418,10 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             sigmas = self._convert_to_beta(in_sigmas=sigmas, num_inference_steps=num_inference_steps)
             timesteps = np.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas])
         elif self.config.use_flow_sigmas:
-            alphas = np.linspace(1, 1 / self.config.num_train_timesteps, num_inference_steps + 1)
+            alphas = np.linspace(1, 1 / self.config.num_train_timesteps, num_inference_steps)
+            alphas[0] = .9994
             sigmas = 1.0 - alphas
-            sigmas = np.flip(self.config.flow_shift * sigmas / (1 + (self.config.flow_shift - 1) * sigmas))[:-1].copy()
+            sigmas = np.flip(self.config.flow_shift * sigmas / (1 + (self.config.flow_shift - 1) * sigmas)).copy()
             timesteps = (sigmas * self.config.num_train_timesteps).copy()
         else:
             sigmas = np.interp(timesteps, np.arange(0, len(sigmas)), sigmas)
